@@ -13,37 +13,50 @@
 #include <psp2/net/netctl.h>
 
 #define NET_BUFFER_SIZE 1*1024*1024 // 1mb
-#define FILE_BUFFER_SIZE 1*1024*1024
+#define FILE_BUFFER_SIZE 2*1024*1024
 
-static bool server_started = false;
+static short server_started = 0;
 static void* net_buffer = NULL;
-static void* file_buffer[2];
+static char* file_buffer[2];
 static int file_buffer_size[2];
 static int current_file_buffer = 0;
+static short buffer_handling = 0;
+static short buffer_lock = 0;
 
+static SceNetInAddr vita_addr;
 static SceUID server_thid = 0;
 
 static int netctl_init = -1;
 static int net_init = -1;
+static char network_ip[16];
+static short network_port;
+static int server_sockfd;
+
+static void handle_packet(short data_length, short pkt_type, char* data) {
+    if(file_buffer_size[current_file_buffer] + data_length > FILE_BUFFER_SIZE) {
+        buffer_lock = 1;
+        while(buffer_handling > 0);
+        current_file_buffer = 1 - current_file_buffer;
+        file_buffer_size[current_file_buffer] = 0;
+        buffer_lock = 0;
+    }
+    int idx = current_file_buffer;
+    memcpy(&file_buffer[idx][file_buffer_size[idx]], data, data_length);
+    file_buffer_size[idx] += data_length;
+}
 
 static int server_thread(SceSize args, void *argp) {
     int ret;
-    UNUSED(ret);
 
     SceNetSockaddrIn serveraddr;
 
-    DEBUG("Server thread started!\n");
-
     /* Create server socket */
-    server_sockfd = sceNetSocket("FTPVita_server_sock",
-        SCE_NET_AF_INET,
-        SCE_NET_SOCK_STREAM,
-        0);
+    server_sockfd = sceNetSocket("network socket", SCE_NET_AF_INET, SCE_NET_SOCK_STREAM, 0);
 
     /* Fill the server's address */
     serveraddr.sin_family = SCE_NET_AF_INET;
     serveraddr.sin_addr.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
-    serveraddr.sin_port = sceNetHtons(FTP_PORT);
+    serveraddr.sin_port = sceNetHtons(network_port);
 
     /* Bind the server's address to the socket */
     ret = sceNetBind(server_sockfd, (SceNetSockaddr *)&serveraddr, sizeof(serveraddr));
@@ -78,34 +91,29 @@ static int server_thread(SceSize args, void *argp) {
                     recv_offset += recv_size;
                     /* Wait 1 ms before sending any data */
                     // sceKernelDelayThread(1*1000);
-                    while(recv_offset >= 4) {
-                        memcpy(&packet_length, recv_buffer, 2);
+                    int offset = 0;
+                    while(offset + 4 <= recv_offset) {
+                        int left_data_size = recv_offset - offset;
+                        memcpy(&packet_length, &recv_buffer[offset], 2);
                         if(packet_length < 4) {
                             // packet length error, skip
-                            int beg_offset = 0;
-                            do {
-                                beg_offset += 2;
-                                memcpy(&packet_length, &recv_buffer[beg_offset], 2);
-                            } while(packet_length < 4 && beg_offset + 2 <= recv_offset);
-                            if(packet_length < 4)
-                                begin_offset += 2;
-                            recv_offset -= beg_offset;
-                            if(recv_offset > 0)
-                                memmove(recv_buffer, &recv_buffer[beg_offset], recv_offset);
-                            if(recv_offset < 4)
-                                continue;
+                            offset += 2;
+                            continue;
                         };
-                        if(packet_length >= recv_offset) {
-                            recv_offset -= packet_length;
-                            if(recv_offset > 0)
-                                memmove(recv_buffer, &recv_buffer[packet_length], recv_offset);
-                        } else
+                        if(packet_length > left_data_size) {
+                            //need receive more data
+                            memmove(recv_buffer, &recv_buffer[offset], left_data_size);
+                            recv_offset = left_data_size;
                             break;
+                        }
+                        memcpy(&packet_type, &recv_buffer[offset + 2], 2);
+                        handle_packet(packet_length - 4, packet_type, &recv_buffer[offset + 4]);
+                        offset += packet_length;
                     }
-                } else if (client->n_recv == 0) {
+                } else if (recv_size == 0) {
                     /* Value 0 means connection closed by the remote peer */
                     break;
-                } else if (client->n_recv == SCE_NET_ERROR_EINTR) {
+                } else if (recv_size == SCE_NET_ERROR_EINTR) {
                     /* Socket aborted (ftpvita_fini() called) */
                     break;
                 } else {
@@ -114,7 +122,7 @@ static int server_thread(SceSize args, void *argp) {
                 }
             }
             /* Close the client's socket */
-            sceNetSocketClose(client->ctrl_sockfd);
+            sceNetSocketClose(client_sockfd);
         } else {
             break;
         }
@@ -153,7 +161,8 @@ int vitatp_begin_server(char *vita_ip, short port) {
 
     /* Init NetCtl */
     ret = netctl_init = sceNetCtlInit();
-    if (netctl_init < 0 && netctl_init != NET_CTL_ERROR_NOT_TERMINATED)
+    // 0x80412102 = NET_CTL_ERROR_NOT_TERMINATED
+    if (netctl_init < 0 && netctl_init != 0x80412102)
         goto error_netctlinit;
 
     /* Get IP address */
@@ -162,20 +171,20 @@ int vitatp_begin_server(char *vita_ip, short port) {
         goto error_netctlgetinfo;
 
     /* Return data */
-    strcpy(vita_ip, info.ip_address);
-    *vita_port = FTP_PORT;
+    strcpy(network_ip, info.ip_address);
+    network_port = port;
 
     /* Save the IP of PSVita to a global variable */
     sceNetInetPton(SCE_NET_AF_INET, info.ip_address, &vita_addr);
 
     /* Create server thread */
-    server_thid = sceKernelCreateThread("FTPVita_server_thread",
+    server_thid = sceKernelCreateThread("server_thread",
         server_thread, 0x10000100, 0x10000, 0, 0, NULL);
 
     /* Start the server thread */
     sceKernelStartThread(server_thid, 0, NULL);
 
-    server_started = true;
+    server_started = 1;
 
     return 0;
 
@@ -190,9 +199,9 @@ error_netctlinit:
         net_init = -1;
     }
 error_netinit:
-    if (net_memory) {
-        free(net_memory);
-        net_memory = NULL;
+    if (net_buffer) {
+        free(net_buffer);
+        net_buffer = NULL;
     }
 error_netstat:
     return ret;
@@ -200,7 +209,7 @@ error_netstat:
 
 int vitatp_end_server() {
     if (!server_started)
-        return;
+        return -1;
     /* In order to "stop" the blocking sceNetAccept,
     * we have to close the server socket; this way
     * the accept call will return an error */
@@ -225,5 +234,6 @@ int vitatp_end_server() {
     netctl_init = -1;
     net_init = -1;
     net_buffer = NULL;
-    server_started = false;
+    server_started = 0;
+    return 0;
 }
