@@ -1,8 +1,13 @@
 TITLE_ID = VITASHELL
 TARGET   = VitaShell
-OBJS     = main.o init.o io_process.o package_installer.o archive.o photo.o file.o text.o hex.o \
+GENOBJS  = main.o init.o io_process.o package_installer.o archive.o photo.o file.o text.o hex.o \
 		   uncommon_dialog.o message_dialog.o ime_dialog.o config.o theme.o language.o utils.o sha1.o \
-		   audioplayer.o minizip/unzip.o minizip/ioapi.o
+		   audioplayer.o vitatp.o minizip/unzip.o minizip/ioapi.o
+ifndef OBJS_OUTPUT_DIR
+	OBJS_OUTPUT_DIR = objs
+endif
+
+OBJS     = $(addprefix $(OBJS_OUTPUT_DIR)/, $(GENOBJS))
 
 RESOURCES_PNG = resources/ftp.png resources/dialog.png resources/context.png resources/battery.png resources/battery_bar_green.png resources/battery_bar_red.png \
 		   resources/headphone.png resources/audio_previous.png resources/audio_pause.png resources/audio_play.png \
@@ -53,10 +58,14 @@ eboot.bin: $(TARGET).velf
 $(TARGET).elf: $(OBJS)
 	$(CC) $(CFLAGS) $^ $(LIBS) -o $@
 
+$(OBJS_OUTPUT_DIR)/%.o: %.c objs_dir 
+	$(CC) $(CFLAGS) -c -o $@ $<
 %.o: %.png
 	$(PREFIX)-ld -r -b binary -o $@ $^
 %.o: %.txt
 	$(PREFIX)-ld -r -b binary -o $@ $^
+objs_dir:
+	mkdir -p $(OBJS_OUTPUT_DIR)/minizip
 
 clean:
 	@rm -rf $(TARGET).vpk $(TARGET).velf $(TARGET).elf $(OBJS) \
