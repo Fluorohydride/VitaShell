@@ -37,6 +37,7 @@
 #include "init.h"
 #include "io_process.h"
 #include "package_installer.h"
+#include "network_update.h"
 #include "archive.h"
 #include "photo.h"
 #include "file.h"
@@ -48,6 +49,7 @@
 #include "language.h"
 #include "utils.h"
 #include "audioplayer.h"
+#include "sfo.h"
 #include "vitatp.h"
 
 int _newlib_heap_size_user = 64 * 1024 * 1024;
@@ -55,10 +57,10 @@ int _newlib_heap_size_user = 64 * 1024 * 1024;
 #define MAX_DIR_LEVELS 1024
 
 // File lists
-static FileList file_list, mark_list, copy_list;
+static FileList file_list, mark_list, copy_list, install_list;
 
 // Paths
-static char cur_file[MAX_PATH_LENGTH], archive_path[MAX_PATH_LENGTH];
+static char cur_file[MAX_PATH_LENGTH], archive_path[MAX_PATH_LENGTH], install_path[MAX_PATH_LENGTH];
 
 // Position
 static int base_pos = 0, rel_pos = 0;
@@ -148,6 +150,39 @@ DIR_UP_RETURN:
 	dirUpCloseArchive();
 }
 
+void focusOnFilename(char *name) {
+	int name_pos = fileListGetNumberByName(&file_list, name);
+	if (name_pos < file_list.length) {
+		while (1) {
+			int index = base_pos + rel_pos;
+			if (index == name_pos)
+				break;
+
+			if (index > name_pos) {
+				if (rel_pos > 0) {
+					rel_pos--;
+				} else {
+					if (base_pos > 0) {
+						base_pos--;
+					}
+				}
+			}
+
+			if (index < name_pos) {
+				if ((rel_pos + 1) < file_list.length) {
+					if ((rel_pos + 1) < MAX_POSITION) {
+						rel_pos++;
+					} else {
+						if ((base_pos + rel_pos + 1) < file_list.length) {
+							base_pos++;
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 int refreshFileList() {
 	int ret = 0, res = 0;
 
@@ -222,10 +257,10 @@ void refreshCopyList() {
 		char path[MAX_PATH_LENGTH];
 		snprintf(path, MAX_PATH_LENGTH, "%s%s", copy_list.path, entry->name);
 
-		// TODO: fix for archives
 		// Check if the entry still exits. If not, remove it from list
 		SceIoStat stat;
-		if (sceIoGetstat(path, &stat) < 0)
+		int res = sceIoGetstat(path, &stat);
+		if (res < 0 && res != 0x80010014)
 			fileListRemoveEntry(&copy_list, entry);
 
 		// Next
@@ -258,6 +293,9 @@ int handleFile(char *file, FileListEntry *entry) {
 	}
 
 	switch (type) {
+		case FILE_TYPE_INI:
+		case FILE_TYPE_TXT:
+		case FILE_TYPE_XML:
 		case FILE_TYPE_UNKNOWN:
 			res = textViewer(file);
 			break;
@@ -279,6 +317,10 @@ int handleFile(char *file, FileListEntry *entry) {
 			
 		case FILE_TYPE_ZIP:
 			res = archiveOpen(file);
+			break;
+
+		case FILE_TYPE_SFO:
+			res = SFOReader(file);
 			break;
 			
 		default:
@@ -307,7 +349,12 @@ void drawScrollBar(int pos, int n) {
 
 void drawShellInfo(char *path) {
 	// Title
-	pgf_draw_textf(SHELL_MARGIN_X, SHELL_MARGIN_Y, TITLE_COLOR, FONT_SIZE, "VitaShell %d.%d", VITASHELL_VERSION_MAJOR, VITASHELL_VERSION_MINOR);
+	char version[8];
+	sprintf(version, "%X.%X", VITASHELL_VERSION_MAJOR, VITASHELL_VERSION_MINOR);
+	if (version[3] == '0')
+		version[3] = '\0';
+
+	pgf_draw_textf(SHELL_MARGIN_X, SHELL_MARGIN_Y, TITLE_COLOR, FONT_SIZE, "VitaShell %s", version);
 
 	// Battery
 	float battery_x = ALIGN_LEFT(SCREEN_WIDTH - SHELL_MARGIN_X, vita2d_texture_get_width(battery_image));
@@ -315,8 +362,11 @@ void drawShellInfo(char *path) {
 
 	vita2d_texture *battery_bar_image = battery_bar_green_image;
 
-	if (scePowerIsLowBattery())
+	if (scePowerIsBatteryCharging()) {
+		battery_bar_image = battery_bar_charge_image;
+	} else if (scePowerIsLowBattery()) {
 		battery_bar_image = battery_bar_red_image;
+	} 
 
 	float percent = scePowerGetBatteryLifePercent() / 100.0f;
 
@@ -390,7 +440,8 @@ void drawShellInfo(char *path) {
 }
 
 enum MenuEntrys {
-	MENU_ENTRY_MARK_UNMARK_ALL,
+	MENU_ENTRY_INSTALL_ALL,
+	MENU_ENTRY_MARK_UNMARK_ALL,	
 	MENU_ENTRY_EMPTY_1,
 	MENU_ENTRY_MOVE,
 	MENU_ENTRY_COPY,
@@ -414,7 +465,8 @@ typedef struct {
 } MenuEntry;
 
 MenuEntry menu_entries[] = {
-	{ MARK_ALL, VISIBILITY_INVISIBLE },
+	{ INSTALL_ALL, VISIBILITY_INVISIBLE },
+	{ MARK_ALL, VISIBILITY_INVISIBLE },	
 	{ -1, VISIBILITY_UNUSED },
 	{ MOVE, VISIBILITY_INVISIBLE },
 	{ COPY, VISIBILITY_INVISIBLE },
@@ -459,6 +511,10 @@ void initContextMenu() {
 		menu_entries[MENU_ENTRY_DELETE].visibility = VISIBILITY_INVISIBLE;
 		menu_entries[MENU_ENTRY_RENAME].visibility = VISIBILITY_INVISIBLE;
 		menu_entries[MENU_ENTRY_NEW_FOLDER].visibility = VISIBILITY_INVISIBLE;
+	}
+
+	if(file_entry->type != FILE_TYPE_VPK) {
+		menu_entries[MENU_ENTRY_INSTALL_ALL].visibility = VISIBILITY_INVISIBLE;
 	}
 
 	// TODO: Moving from one mount point to another is not possible
@@ -717,6 +773,37 @@ void contextMenuCtrl() {
 				dialog_step = DIALOG_STEP_NEW_FOLDER;
 				break;
 			}
+			
+			case MENU_ENTRY_INSTALL_ALL:
+			{
+				// Empty install list
+				fileListEmpty(&install_list);
+
+				FileListEntry *file_entry = file_list.head->next; // Ignore '..'
+
+				int i;
+				for (i = 0; i < file_list.length - 1; i++) {
+					char path[MAX_PATH_LENGTH];
+					snprintf(path, MAX_PATH_LENGTH, "%s%s", file_list.path, file_entry->name);
+
+					int type = getFileType(path);
+					if (type == FILE_TYPE_VPK) {
+						FileListEntry *install_entry = malloc(sizeof(FileListEntry));
+						memcpy(install_entry, file_entry, sizeof(FileListEntry));
+						fileListAddEntry(&install_list, install_entry, SORT_NONE);
+					}
+
+					// Next
+					file_entry = file_entry->next;
+				}
+
+				strcpy(install_list.path, file_list.path);
+
+				initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_ALL_QUESTION]);
+				dialog_step = DIALOG_STEP_INSTALL_QUESTION;
+				
+				break;
+			}
 		}
 
 		ctx_menu_mode = CONTEXT_MENU_CLOSING;
@@ -743,7 +830,6 @@ int dialogSteps() {
 		// With refresh
 		case DIALOG_STEP_COPIED:
 		case DIALOG_STEP_DELETED:
-		case DIALOG_STEP_INSTALLED:
 			if (msg_result == MESSAGE_DIALOG_RESULT_NONE || msg_result == MESSAGE_DIALOG_RESULT_FINISHED) {
 				refresh = 1;
 				dialog_step = DIALOG_STEP_NONE;
@@ -820,39 +906,6 @@ int dialogSteps() {
 
 			break;
 			
-		case DIALOG_STEP_INSTALL_QUESTION:
-			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
-				initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
-				dialog_step = DIALOG_STEP_INSTALL_CONFIRMED;
-			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
-				dialog_step = DIALOG_STEP_NONE;
-			}
-
-			break;
-			
-		case DIALOG_STEP_INSTALL_CONFIRMED:
-			if (msg_result == MESSAGE_DIALOG_RESULT_RUNNING) {
-				InstallArguments args;
-				args.file = cur_file;
-
-				SceUID thid = sceKernelCreateThread("install_thread", (SceKernelThreadEntry)install_thread, 0x40, 0x10000, 0, 0, NULL);
-				if (thid >= 0)
-					sceKernelStartThread(thid, sizeof(InstallArguments), &args);
-
-				dialog_step = DIALOG_STEP_INSTALLING;
-			}
-
-			break;
-			
-		case DIALOG_STEP_INSTALL_WARNING:
-			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
-				dialog_step = DIALOG_STEP_INSTALL_WARNING_AGREED;
-			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
-				dialog_step = DIALOG_STEP_CANCELLED;
-			}
-
-			break;
-			
 		case DIALOG_STEP_RENAME:
 			if (ime_result == IME_DIALOG_RESULT_FINISHED) {
 				char *name = (char *)getImeDialogInputTextUTF8();
@@ -911,14 +964,98 @@ int dialogSteps() {
 			}
 
 			break;
+			
+		case DIALOG_STEP_INSTALL_QUESTION:
+			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
+				initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
+				dialog_step = DIALOG_STEP_INSTALL_CONFIRMED;
+			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
+				dialog_step = DIALOG_STEP_NONE;
+			}
+
+			break;
+			
+		case DIALOG_STEP_INSTALL_CONFIRMED:
+			if (msg_result == MESSAGE_DIALOG_RESULT_RUNNING) {
+				InstallArguments args;
+				if(install_list.length > 0) {
+					FileListEntry *entry = install_list.head;
+					snprintf(install_path, MAX_PATH_LENGTH, "%s%s", install_list.path, entry->name);
+					args.file = install_path;
+
+					// Focus
+					focusOnFilename(entry->name);
+
+					// Remove entry
+					fileListRemoveEntry(&install_list, entry);
+				} else {
+					args.file = cur_file;
+				}
+
+				SceUID thid = sceKernelCreateThread("install_thread", (SceKernelThreadEntry)install_thread, 0x40, 0x10000, 0, 0, NULL);
+				if (thid >= 0)
+					sceKernelStartThread(thid, sizeof(InstallArguments), &args);
+
+				dialog_step = DIALOG_STEP_INSTALLING;
+			}
+
+			break;
+			
+		case DIALOG_STEP_INSTALL_WARNING:
+			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
+				dialog_step = DIALOG_STEP_INSTALL_WARNING_AGREED;
+			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
+				dialog_step = DIALOG_STEP_CANCELLED;
+			}
+
+			break;
+			
+		case DIALOG_STEP_INSTALLED:
+			if (msg_result == MESSAGE_DIALOG_RESULT_NONE || msg_result == MESSAGE_DIALOG_RESULT_FINISHED) {
+				if(install_list.length > 0) {
+					initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
+					dialog_step = DIALOG_STEP_INSTALL_CONFIRMED;
+					break;
+				}
+
+				dialog_step = DIALOG_STEP_NONE;
+			}
+
+			break;
+			
+		case DIALOG_STEP_UPDATE_QUESTION:
+			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
+				initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[DOWNLOADING]);
+				dialog_step = DIALOG_STEP_DOWNLOADING;
+			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
+				dialog_step = DIALOG_STEP_NONE;
+			}
+			
+		case DIALOG_STEP_DOWNLOADED:
+			if (msg_result == MESSAGE_DIALOG_RESULT_FINISHED) {
+				initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
+
+				SceUID thid = sceKernelCreateThread("update_extract_thread", (SceKernelThreadEntry)update_extract_thread, 0x40, 0x10000, 0, 0, NULL);
+				if (thid >= 0)
+					sceKernelStartThread(thid, 0, NULL);
+
+				dialog_step = DIALOG_STEP_EXTRACTING;
+			}
+
+			break;
+			
+		case DIALOG_STEP_EXTRACTED:
+			launchAppByUriExit("VSUPDATER");
+			dialog_step = DIALOG_STEP_NONE;
+			break;
 	}
 
 	return refresh;
 }
 
 void fileBrowserMenuCtrl() {
-	// Hidden trigger
-	if (current_buttons & SCE_CTRL_LTRIGGER && current_buttons & SCE_CTRL_RTRIGGER && current_buttons & SCE_CTRL_START) {
+	// System information
+	if (current_buttons & SCE_CTRL_START) {
 		SceSystemSwVersionParam sw_ver_param;
 		sw_ver_param.size = sizeof(SceSystemSwVersionParam);
 		sceKernelGetSystemSwVersion(&sw_ver_param);
@@ -933,7 +1070,7 @@ void fileBrowserMenuCtrl() {
 		getSizeString(free_size_string, free_size);
 		getSizeString(max_size_string, max_size);
 
-		initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK, "System software: %s\nModel: 0x%08X\nMAC address: %s\nIP address: %s\nMemory card: %s/%s", sw_ver_param.version_string, sceKernelGetModelForCDialog(), mac_string, ip, free_size_string, max_size_string);
+		initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK, language_container[SYS_INFO], sw_ver_param.version_string, sceKernelGetModelForCDialog(), mac_string, ip, free_size_string, max_size_string);
 		dialog_step = DIALOG_STEP_SYSTEM;
 	}
 
@@ -1118,7 +1255,7 @@ int shellMain() {
 		}
 
 		// Start drawing
-		startDrawing();
+		startDrawing(bg_browser_image);
 
 		// Draw shell info
 		drawShellInfo(file_list.path);
@@ -1132,28 +1269,36 @@ int shellMain() {
 		int i;
 		for (i = 0; i < MAX_ENTRIES && (base_pos + i) < file_list.length; i++) {
 			uint32_t color = GENERAL_COLOR;
+			float y = START_Y + (i * FONT_Y_SPACE);
 
 			// Folder
-			if (file_entry->is_folder)
+			if (file_entry->is_folder) {
 				color = FOLDER_COLOR;
-
-			// Images
-			if (file_entry->type == FILE_TYPE_BMP || file_entry->type == FILE_TYPE_PNG || file_entry->type == FILE_TYPE_JPEG || file_entry->type == FILE_TYPE_MP3) {
-				color = IMAGE_COLOR;
-			}
-
-			// Archives
-			if (!isInArchive()) {
-				if (file_entry->type == FILE_TYPE_VPK || file_entry->type == FILE_TYPE_ZIP) {
+				vita2d_draw_texture(folder_icon, SHELL_MARGIN_X, y + 3.0f);
+			} else {
+				if (file_entry->type == FILE_TYPE_BMP || file_entry->type == FILE_TYPE_PNG || file_entry->type == FILE_TYPE_JPEG) { // Images
+					color = IMAGE_COLOR;
+					vita2d_draw_texture(image_icon, SHELL_MARGIN_X, y + 3.0f);
+				} else if (file_entry->type == FILE_TYPE_VPK || file_entry->type == FILE_TYPE_ZIP) { // Archive
 					color = ARCHIVE_COLOR;
+					vita2d_draw_texture(archive_icon, SHELL_MARGIN_X, y + 3.0f);
+				} else if (file_entry->type == FILE_TYPE_MP3) { // Audio
+					color = IMAGE_COLOR;
+					vita2d_draw_texture(audio_icon, SHELL_MARGIN_X, y + 3.0f);
+				} else if (file_entry->type == FILE_TYPE_SFO) { // SFO
+					// note: specific color to be determined
+					vita2d_draw_texture(sfo_icon, SHELL_MARGIN_X, y + 3.0f);
+				} else if (file_entry->type == FILE_TYPE_INI || file_entry->type == FILE_TYPE_TXT || file_entry->type == FILE_TYPE_XML) { // TXT
+					// note: specific color to be determined
+					vita2d_draw_texture(text_icon, SHELL_MARGIN_X, y + 3.0f);
+				} else { // Other files
+					vita2d_draw_texture(file_icon, SHELL_MARGIN_X, y + 3.0f);
 				}
 			}
 
 			// Current position
 			if (i == rel_pos)
 				color = FOCUS_COLOR;
-
-			float y = START_Y + (i * FONT_Y_SPACE);
 
 			// Marked
 			if (fileListFindEntry(&mark_list, file_entry->name))
@@ -1183,7 +1328,7 @@ int shellMain() {
 			}
 
 			// Draw shortened file name
-			pgf_draw_text(SHELL_MARGIN_X, y, color, FONT_SIZE, file_entry->name);
+			pgf_draw_text(SHELL_MARGIN_X + 26.0f, y, color, FONT_SIZE, file_entry->name);
 
 			if (j != length)
 				file_entry->name[j] = ch;
@@ -1247,16 +1392,6 @@ void initShell() {
 }
 
 void getNetInfo() {
-	static char memory[16 * 1024];
-
-	SceNetInitParam param;
-	param.memory = memory;
-	param.size = sizeof(memory);
-	param.flags = 0;
-
-	int net_init = sceNetInit(&param);
-	int netctl_init = sceNetCtlInit();
-
 	// Get mac address
 	sceNetGetMacAddress(&mac, 0);
 
@@ -1267,12 +1402,6 @@ void getNetInfo() {
 	} else {
 		strcpy(ip, info.ip_address);
 	}
-
-	if (netctl_init >= 0)
-		sceNetCtlTerm();
-
-	if (net_init >= 0)
-		sceNetTerm();
 }
 
 int main(int argc, const char *argv[]) {
@@ -1292,6 +1421,11 @@ int main(int argc, const char *argv[]) {
 
 	// Load language
 	loadLanguage(language);
+
+	// Automatic network update
+	SceUID thid = sceKernelCreateThread("network_update_thread", (SceKernelThreadEntry)network_update_thread, 0x40, 0x10000, 0, 0, NULL);
+	if (thid >= 0)
+		sceKernelStartThread(thid, 0, NULL);
 
 	// Main
 	initShell();

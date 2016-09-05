@@ -32,10 +32,14 @@
 enum FileTypes {
 	FILE_TYPE_UNKNOWN,
 	FILE_TYPE_BMP,
+	FILE_TYPE_INI,
 	FILE_TYPE_JPEG,
-	FILE_TYPE_PNG,
 	FILE_TYPE_MP3,
+	FILE_TYPE_PNG,
+	FILE_TYPE_SFO,
+	FILE_TYPE_TXT,
 	FILE_TYPE_VPK,
+	FILE_TYPE_XML,
 	FILE_TYPE_ZIP,
 };
 
@@ -81,10 +85,14 @@ char **getMountPoints();
 
 FileListEntry *fileListFindEntry(FileList *list, char *name);
 FileListEntry *fileListGetNthEntry(FileList *list, int n);
+int fileListGetNumberByName(FileList *list, char *name);
+
 void fileListAddEntry(FileList *list, FileListEntry *entry, int sort);
 int fileListRemoveEntry(FileList *list, FileListEntry *entry);
 int fileListRemoveEntryByName(FileList *list, char *name);
+
 void fileListEmpty(FileList *list);
+
 int fileListGetEntries(FileList *list, char *path);
 
 #endif
