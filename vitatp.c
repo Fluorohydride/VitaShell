@@ -12,161 +12,293 @@
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 
+#include "main.h"
+#include "language.h"
+#include "message_dialog.h"
+#include "package_installer.h"
+#include "vitatp.h"
+
+typedef struct {
+    short length;
+    short type;
+} pkt_header;
+
+typedef struct {
+    short length;
+    short type;
+    int result;
+} pkt_response;
+
+typedef struct {
+    short type;
+    void* arg1;
+    void* arg2;
+} task_info;
+
 #define NET_BUFFER_SIZE 4*1024*1024
 #define FILE_BUFFER_SIZE 2*1024*1024
+#define TASK_MAX_SIZE 16
 
 static short server_started = 0;
 static void* net_buffer = NULL;
-static char* file_buffer[2];
-static int file_buffer_size[2];
-static int current_file_buffer = 0;
-static short buffer_handling = 0;
-static short buffer_lock = 0;
+static char* file_buffer = NULL;
+static int file_buffer_size = 0;
 
 static SceNetInAddr vita_addr;
-static SceUID server_thid[2];
+static SceUID server_thid;
 
 static int netctl_init = -1;
 static int net_init = -1;
 static char network_ip[16];
 static short network_port = 0;
-static int left_file_size = 0;
+static int server_sockfd = 0;
+static int client_sockfd = 0;
 
-static void handle_packet(short data_length, short pkt_type, char* data) {
-    // todo: add protocol handler
+static int copy_confirm = 0;
+static int current_file_size = 0;
+static int current_file_flag = 0;
+static char current_file_name[256];
+static char current_path[256];
+static int current_offset;
+static SceUID writing_file = -1;
+
+static task_info tasks[TASK_MAX_SIZE];
+static short task_begin = 0;
+static short task_end = 0;
+
+// ==============================
+#define VTP_BEGIN_FILE 0x10
+#define VTP_FILE_CONTENT 0x11
+#define VTP_FILE_END 0x12
+
+#define VTP_INSTALL_VPK 0x20
+#define VTP_VPK_INNER_FILE 0x21
+#define VTP_VPK_INNER_FILE_CONTENT 0x22
+#define VTP_VPK_INNER_FILE_END 0x23
+
+// ==============================
+#define VTP_FLAG_RESTART 0x1
+#define VTP_FLAG_COMPRESSED 0x2
+#define VTP_FLAG_EXTRA_PERMISSION 0x4
+
+// ==============================
+#define VTPR_BEGIN_FILE 0x10
+#define VTPR_FILE_CONTINUE 0x11
+#define VTPR_FILE_END 0x12
+
+// ==============================
+#define TASK_WRITE_FILE 0x1
+#define TASK_WRITE_FILE_DECOM 0x2
+
+static void task_callback(short type, void* arg1, void* arg2) {
+    switch(type) {
+        case TASK_WRITE_FILE: {
+            int buffer_size = (int)arg2;
+            if(writing_file > 0) {
+                sceIoWrite(writing_file, arg1, file_buffer_size);
+            }
+            break;
+        }
+        case TASK_WRITE_FILE_DECOM: {
+            break;
+        }
+    }
 }
 
-static void receive_file_data(short data_length, char* data) {
-    if(file_buffer_size[current_file_buffer] + data_length > FILE_BUFFER_SIZE) {
-        buffer_lock = 1;
-        while(buffer_handling > 0);
-        current_file_buffer = 1 - current_file_buffer;
-        file_buffer_size[current_file_buffer] = 0;
-        buffer_lock = 0;
+static void add_task(short type, void* arg1, void* arg2) {
+    while(((task_end + 1) % TASK_MAX_SIZE) == task_begin)
+        sceKernelDelayThread(1000);
+    tasks[task_end].type = type;
+    tasks[task_end].arg1 = arg1;
+    tasks[task_end].arg2 = arg2;
+    task_end = (task_end + 1) % TASK_MAX_SIZE;
+}
+
+static void send_to_client(short pkt_type, char* data, short data_length) {
+    static pkt_header hdr;
+    hdr.length = 4 + data_length;
+    hdr.type = pkt_type;
+    sceNetSend(client_sockfd, &hdr, 4, 0);
+    if(data && data_length > 0)
+        sceNetSend(client_sockfd, data, data_length, 0);
+}
+
+static void send_response(short pkt_type, int result) {
+    static pkt_response resp;
+    resp.length = 8;
+    resp.type = pkt_type;
+    resp.result = result;
+    sceNetSend(client_sockfd, &resp, 8, 0);
+}
+
+static void handle_packet(short pkt_type, char* data, short data_length) {
+    switch(pkt_type) {
+        case VTP_BEGIN_FILE: {
+            // int file_size, int flag, char* file_name
+            if(data_length <= 8)
+                break;
+            if(writing_file > 0) {
+                send_response(VTPR_BEGIN_FILE, 1); // VTP_FILE_END should be send before a new file
+                break;
+            }
+            memcpy(&current_file_size, data, 4);
+            memcpy(&current_file_flag, &data[4], 4);
+            strncpy(current_file_name, &data[8], (data_length < 263) ? data_length - 8 : 255);
+            current_file_name[255] = 0;
+            while(dialog_step != DIALOG_STEP_NONE)
+                sceKernelDelayThread(1000);
+            initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_WARNING]);
+			dialog_step = DIALOG_STEP_REMOTE_COPY;
+            while(dialog_step == DIALOG_STEP_REMOTE_COPY)
+                sceKernelDelayThread(1000);
+            if(dialog_step == DIALOG_STEP_CANCELLED)
+                send_response(VTPR_BEGIN_FILE, 2); // user canceled
+            else {
+                int pos = 0;
+                int slash_pos = -1;
+                while(current_file_name[pos] != 0) {
+                    if(current_file_name[pos] == '/')
+                        slash_pos = pos;
+                    pos++;
+                }
+                if(slash_pos == -1) {
+                    send_response(VTPR_BEGIN_FILE, 3); // path error
+                    break;
+                }
+                current_file_name[slash_pos] = 0;
+                int dirres = sceIoMkdir(current_file_name, 0777);
+                if (dirres <= 0 && dirres != SCE_ERROR_ERRNO_EEXIST) {
+                    send_response(VTPR_BEGIN_FILE, 3); // path error
+                    break;
+                }
+                current_file_name[slash_pos] = '/';
+                if(current_file_flag & VTP_FLAG_RESTART)
+                    writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+                else
+                    writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+                if(writing_file < 0) {
+                    send_response(VTPR_BEGIN_FILE, 4); // cannot open file
+                    break;
+                }
+                current_offset = sceIoLseek(writing_file, 0, SCE_SEEK_END);
+                send_response(VTPR_BEGIN_FILE, 0);
+                send_response(VTPR_FILE_CONTINUE, current_offset);
+            }
+            break;
+        }
+        case VTP_FILE_CONTENT: {
+            if(writing_file <= 0)
+                break;
+            if(data_length > FILE_BUFFER_SIZE)
+                break;
+            if(data_length == 0) {
+                // send offset
+                send_response(VTPR_FILE_CONTINUE, current_offset);
+            } else {
+                if(file_buffer_size + data_length > FILE_BUFFER_SIZE) {
+                    char* buffer = malloc(file_buffer_size);
+                    memcpy(buffer, file_buffer, file_buffer_size);
+                    add_task(TASK_WRITE_FILE, buffer, (void*)file_buffer_size);
+                    file_buffer_size = 0;
+                }
+                memcpy(&file_buffer[file_buffer_size], data, data_length);
+                file_buffer_size += data_length;
+                current_offset += data_length;
+            }
+            break;
+        }
+        case VTP_FILE_END: {
+            if(writing_file <= 0)
+                break;
+            sceIoWrite(writing_file, file_buffer, file_buffer_size);
+            file_buffer_size = 0;
+            current_offset = 0;
+            sceIoClose(writing_file);
+            writing_file = -1;
+            send_response(VTPR_FILE_END, 0);
+            break;
+        }
     }
-    int idx = current_file_buffer;
-    memcpy(&file_buffer[idx][file_buffer_size[idx]], data, data_length);
-    file_buffer_size[idx] += data_length;
 }
 
 static int control_thread(SceSize args, void *argp) {
-    int ret;
     SceNetSockaddrIn serveraddr;
-
-    /* Create server socket */
-    server_sockfd = sceNetSocket("control socket", SCE_NET_AF_INET, SCE_NET_SOCK_STREAM, SCE_NET_IPPROTO_TCP);
-    if(server_sockfd == -1)
-        goto exit;
-
-    /* Fill the server's address */
     serveraddr.sin_family = SCE_NET_AF_INET;
     serveraddr.sin_addr.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
     serveraddr.sin_port = sceNetHtons(network_port);
 
-    /* Bind the server's address to the socket */
-    ret = sceNetBind(server_sockfd, (SceNetSockaddr *)&serveraddr, sizeof(serveraddr));
-    if(ret != 0)
+    server_sockfd = sceNetSocket("control socket", SCE_NET_AF_INET, SCE_NET_SOCK_STREAM, SCE_NET_IPPROTO_TCP);
+    if(server_sockfd == -1)
         goto exit;
-
-    /* Start listening */
-    ret = sceNetListen(server_sockfd, 128);
-    if(ret != 0)
+    if(sceNetBind(server_sockfd, (SceNetSockaddr *)&serveraddr, sizeof(serveraddr)) != 0)
         goto exit;
-
-    file_buffer[0] = malloc(FILE_BUFFER_SIZE);
-    file_buffer[1] = malloc(FILE_BUFFER_SIZE);
-    file_buffer_size[0] = 0;
-    file_buffer_size[1] = 0;
-    current_file_buffer = 0;
+    if(sceNetListen(server_sockfd, 128) != 0)
+        goto exit;
+    file_buffer = malloc(FILE_BUFFER_SIZE);
+    file_buffer_size = 0;
     while (1) {
         /* Accept clients */
         SceNetSockaddrIn clientaddr;
-        int client_sockfd;
         unsigned int addrlen = sizeof(clientaddr);
-        step = 1;
         client_sockfd = sceNetAccept(server_sockfd, (SceNetSockaddr *)&clientaddr, &addrlen);
         if (client_sockfd >= 0) {
-            /* Get the client's IP address */
-            char remote_ip[16];
             char recv_buffer[4096];
             int recv_offset = 0;
-            short packet_length = 0;
-            short packet_type = 0;
             int recv_size = 0;         
-            sceNetInetNtop(SCE_NET_AF_INET, &clientaddr.sin_addr.s_addr, remote_ip, sizeof(remote_ip));
-
+            pkt_header hdr;
             // begin recv
             while (1) {
-                if(left_file_size > 0) {
-                    int recv_size = sceNetRecv(client_sockfd, recv_buffer, 4096, 0);
-                    if(recv_size <= left_file_size) {
-                        receive_file_data(recv_size, recv_buffer);
-                        left_file_size -= recv_size;
-                        continue;
-                    } else {
-                        receive_file_data(left_file_size, recv_buffer);
-                        left_file_size = 0;
-                    }                    
-                }
                 recv_size = sceNetRecv(client_sockfd, &recv_buffer[recv_offset], 4096 - recv_offset, 0);
                 if (recv_size > 0) {
                     recv_offset += recv_size;
-                    /* Wait 1 ms before sending any data */
-                    // sceKernelDelayThread(1*1000);
                     int offset = 0;
                     while(offset + 4 <= recv_offset) {
                         int left_data_size = recv_offset - offset;
-                        memcpy(&packet_length, &recv_buffer[offset], 2);
-                        if(packet_length < 4) {
+                        memcpy(&hdr, &recv_buffer[offset], 4);
+                        if(hdr.length < 4) {
                             // packet length error, skip
                             offset += 2;
                             continue;
                         };
-                        if(packet_length > left_data_size) {
-                            //need receive more data
+                        if(hdr.length > left_data_size) {
+                            // need receive more data
                             memmove(recv_buffer, &recv_buffer[offset], left_data_size);
                             recv_offset = left_data_size;
                             break;
                         }
-                        memcpy(&packet_type, &recv_buffer[offset + 2], 2);
-                        handle_packet(packet_length - 4, packet_type, &recv_buffer[offset + 4]);
-                        offset += packet_length;
-                        if(left_data_size) {
-                            receive_file_data(recv_size - offset, &recv_size[offset]);
-                            recv_size = 0;
-                            offset = 0;
-                        }
+                        handle_packet(hdr.type, &recv_buffer[offset + 4], hdr.length - 4);
+                        offset += hdr.length;
                     }
-                } else if (recv_size == 0) {
-                    /* Value 0 means connection closed by the remote peer */
-                    break;
-                } else if (recv_size == SCE_NET_ERROR_EINTR) {
-                    /* Socket aborted (ftpvita_fini() called) */
-                    break;
                 } else {
-                    /* Other errors */
+                    // =0 -- connection closed
+                    // <0 -- error
                     break;
                 }
             }
-            /* Close the client's socket */
             sceNetSocketClose(client_sockfd);
-            step = 3;
+            // clear status
+            current_file_size = 0;
+            current_file_flag = 0;
+            if(writing_file > 0) {
+                while(task_begin != task_end)
+                    sceKernelDelayThread(1000);
+                sceIoClose(writing_file);
+                writing_file = -1;
+            }
         } else {
-            err = 4;
+            // accept error
             break;
         }
     }
 exit:
+    if(file_buffer) {
+        free(file_buffer);
+        file_buffer = NULL;
+    }
+    file_buffer_size = 0;
     server_started = 0;
     sceKernelExitDeleteThread(0);
     return 0;
-}
-
-char* check_info() {
-    static char check_buffer[128];
-    sprintf(check_buffer, "port=[%d,%d]\nserver_started:%d, step:%d, err:%d",
-        net_port[0], net_port[1], server_started, step, err);
-    return check_buffer;
 }
 
 int vitatp_begin_server(short port) {
@@ -216,12 +348,12 @@ int vitatp_begin_server(short port) {
 
     /* Create server thread */
     server_thid = sceKernelCreateThread("remote_control_thread",
-        server_thread, 0x10000100, 0x10000, 0, 0, NULL);
+        control_thread, 0x10000100, 0x10000, 0, 0, NULL);
 
-    networkport = port;
+    network_port = port;
 
     /* Start the server thread */
-    sceKernelStartThread(server_thid[0], 0, NULL);
+    sceKernelStartThread(server_thid, 0, NULL);
 
     server_started = 1;
 
@@ -264,15 +396,16 @@ int vitatp_end_server() {
     if (net_buffer)
         free(net_buffer);
 
-    free(file_buffer[0]);
-    free(file_buffer[1]);
-    file_buffer_size[0] = 0;
-    file_buffer_size[1] = 0;
-    current_file_buffer = 0;
-
     netctl_init = -1;
     net_init = -1;
     net_buffer = NULL;
     server_started = 0;
     return 0;
+}
+
+void check_and_run_remote_task() {
+    while(task_begin != task_end) {
+        task_callback(tasks[task_begin].type, tasks[task_begin].arg1, tasks[task_begin].arg2);
+        task_begin = (task_begin + 1) % TASK_MAX_SIZE;
+    }
 }

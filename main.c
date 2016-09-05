@@ -1048,6 +1048,14 @@ int dialogSteps() {
 			launchAppByUriExit("VSUPDATER");
 			dialog_step = DIALOG_STEP_NONE;
 			break;
+		
+		case DIALOG_STEP_REMOTE_COPY:
+			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
+				dialog_step = DIALOG_STEP_REMOTE_COPY_AGREED;
+			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
+				dialog_step = DIALOG_STEP_CANCELLED;
+			}
+			break;
 	}
 
 	return refresh;

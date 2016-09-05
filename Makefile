@@ -83,3 +83,7 @@ vpksend: $(TARGET).vpk
 send: eboot.bin
 	curl -T eboot.bin ftp://$(PSVITAIP):1337/ux0:/app/$(TITLE_ID)/
 	@echo "Sent."
+
+sendp:
+	curl -T eboot.bin ftp://$(PSVITAIP):1337/ux0:/app/$(TITLE_ID)/
+	@echo "Sent."
