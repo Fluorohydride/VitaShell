@@ -31,8 +31,7 @@ typedef struct {
 
 typedef struct {
     short type;
-    void* arg1;
-    void* arg2;
+    int args[3];
 } task_info;
 
 #define NET_BUFFER_SIZE 4*1024*1024
@@ -90,27 +89,35 @@ static short task_end = 0;
 #define TASK_WRITE_FILE 0x1
 #define TASK_WRITE_FILE_DECOM 0x2
 
-static void task_callback(short type, void* arg1, void* arg2) {
+static void task_callback(short type, int* args) {
     switch(type) {
         case TASK_WRITE_FILE: {
-            int buffer_size = (int)arg2;
+            int buffer_size = args[1];
             if(writing_file > 0) {
-                sceIoWrite(writing_file, arg1, file_buffer_size);
+                char msgbuf[512];
+                sceIoWrite(writing_file, (char*)args[0], file_buffer_size);
+                double progress = (double)((100.0f * args[2]) / (double)current_file_size);
+                snprintf(msgbuf, 512, "%s\n%u/%u", current_file_name, args[2], current_file_size);
+                sceMsgDialogProgressBarSetMsg(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (const SceChar8*)msgbuf);
+		        sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (int)progress);                
             }
+            free((char*)args[0]);
             break;
         }
         case TASK_WRITE_FILE_DECOM: {
+            free((char*)args[0]);
             break;
         }
     }
 }
 
-static void add_task(short type, void* arg1, void* arg2) {
+static void add_task(short type, int arg1, int arg2, int arg3) {
     while(((task_end + 1) % TASK_MAX_SIZE) == task_begin)
         sceKernelDelayThread(1000);
     tasks[task_end].type = type;
-    tasks[task_end].arg1 = arg1;
-    tasks[task_end].arg2 = arg2;
+    tasks[task_end].args[0] = arg1;
+    tasks[task_end].args[1] = arg2;
+    tasks[task_end].args[2] = arg3;
     task_end = (task_end + 1) % TASK_MAX_SIZE;
 }
 
@@ -148,8 +155,8 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
             while(dialog_step != DIALOG_STEP_NONE)
                 sceKernelDelayThread(1000);
             initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_WARNING]);
-			dialog_step = DIALOG_STEP_REMOTE_COPY;
-            while(dialog_step == DIALOG_STEP_REMOTE_COPY)
+			dialog_step = DIALOG_STEP_REMOTE_COPY_CONFIRM;
+            while(dialog_step == DIALOG_STEP_REMOTE_COPY_CONFIRM)
                 sceKernelDelayThread(1000);
             if(dialog_step == DIALOG_STEP_CANCELLED)
                 send_response(VTPR_BEGIN_FILE, 2); // user canceled
@@ -183,6 +190,8 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                 current_offset = sceIoLseek(writing_file, 0, SCE_SEEK_END);
                 send_response(VTPR_BEGIN_FILE, 0);
                 send_response(VTPR_FILE_CONTINUE, current_offset);
+                initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
+			    dialog_step = DIALOG_STEP_REMOTE_COPY;
             }
             break;
         }
@@ -198,7 +207,7 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                 if(file_buffer_size + data_length > FILE_BUFFER_SIZE) {
                     char* buffer = malloc(file_buffer_size);
                     memcpy(buffer, file_buffer, file_buffer_size);
-                    add_task(TASK_WRITE_FILE, buffer, (void*)file_buffer_size);
+                    add_task(TASK_WRITE_FILE, (int)buffer, file_buffer_size, current_offset);
                     file_buffer_size = 0;
                 }
                 memcpy(&file_buffer[file_buffer_size], data, data_length);
@@ -405,7 +414,7 @@ int vitatp_end_server() {
 
 void check_and_run_remote_task() {
     while(task_begin != task_end) {
-        task_callback(tasks[task_begin].type, tasks[task_begin].arg1, tasks[task_begin].arg2);
+        task_callback(tasks[task_begin].type, tasks[task_begin].args);
         task_begin = (task_begin + 1) % TASK_MAX_SIZE;
     }
 }

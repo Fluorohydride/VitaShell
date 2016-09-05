@@ -1084,9 +1084,7 @@ void fileBrowserMenuCtrl() {
 
 	// FTP
 	if (pressed_buttons & SCE_CTRL_SELECT) {
-		if(current_buttons & SCE_CTRL_LTRIGGER) {
-			infoDialog(check_info());
-		} else if(current_buttons & SCE_CTRL_RTRIGGER) {
+		if(current_buttons & SCE_CTRL_RTRIGGER) {
 			if(vitatp_begin_server(1340) == 0)
 				infoDialog("Network Test begin");
 			else
