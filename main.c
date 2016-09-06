@@ -1030,6 +1030,7 @@ int dialogSteps() {
 			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
 				dialog_step = DIALOG_STEP_NONE;
 			}
+			break;
 			
 		case DIALOG_STEP_DOWNLOADED:
 			if (msg_result == MESSAGE_DIALOG_RESULT_FINISHED) {
@@ -1049,11 +1050,19 @@ int dialogSteps() {
 			dialog_step = DIALOG_STEP_NONE;
 			break;
 		
-		case DIALOG_STEP_REMOTE_COPY:
+		case DIALOG_STEP_REMOTE_COPY_CONFIRM:
 			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
 				dialog_step = DIALOG_STEP_REMOTE_COPY_AGREED;
 			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
 				dialog_step = DIALOG_STEP_CANCELLED;
+			}
+			break;
+			
+		case DIALOG_STEP_REMOTE_COPY:
+			if(msg_result != MESSAGE_DIALOG_RESULT_RUNNING) {
+				// canceled
+				vitatp_cancel_current_task();
+				dialog_step = DIALOG_STEP_NONE;
 			}
 			break;
 	}
@@ -1085,10 +1094,7 @@ void fileBrowserMenuCtrl() {
 	// FTP
 	if (pressed_buttons & SCE_CTRL_SELECT) {
 		if(current_buttons & SCE_CTRL_RTRIGGER) {
-			if(vitatp_begin_server(1340) == 0)
-				infoDialog("Network Test begin");
-			else
-				infoDialog("Network Test error");
+			vitatp_begin_server(1340);
 		} else {
 			// Init FTP
 			if (!ftpvita_is_initialized()) {
@@ -1109,11 +1115,11 @@ void fileBrowserMenuCtrl() {
 				// Lock power timers
 				powerLock();
 			}
-		}
-		// Dialog
-		if (ftpvita_is_initialized()) {
-			initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
-			dialog_step = DIALOG_STEP_FTP;
+			// Dialog
+			if (ftpvita_is_initialized()) {
+				initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
+				dialog_step = DIALOG_STEP_FTP;
+			}
 		}
 	}
 
@@ -1230,6 +1236,7 @@ int shellMain() {
 
 	while (1) {
 		readPad();
+		check_and_run_remote_task();
 
 		int refresh = 0;
 
