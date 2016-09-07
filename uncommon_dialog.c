@@ -336,3 +336,8 @@ int drawUncommonDialog() {
 
 	return 0;
 }
+
+int isUncommonDialogAnimating() {
+	return (uncommon_dialog.animation_mode == UNCOMMON_DIALOG_OPENING)
+		|| (uncommon_dialog.animation_mode == UNCOMMON_DIALOG_CLOSING);
+}

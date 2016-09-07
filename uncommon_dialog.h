@@ -34,5 +34,6 @@ enum UncommonAnimationMode {
 };
 
 int drawUncommonDialog();
+int isUncommonDialogAnimating();
 
 #endif

@@ -43,6 +43,7 @@
 #include "file.h"
 #include "text.h"
 #include "hex.h"
+#include "uncommon_dialog.h"
 #include "message_dialog.h"
 #include "ime_dialog.h"
 #include "theme.h"
@@ -1236,7 +1237,8 @@ int shellMain() {
 
 	while (1) {
 		readPad();
-		check_and_run_remote_task();
+		if(!isUncommonDialogAnimating())
+			check_and_run_remote_task();
 
 		int refresh = 0;
 

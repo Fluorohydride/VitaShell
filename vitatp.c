@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <sys/syslimits.h>
+#include <zlib.h>
 
 #include <psp2/kernel/threadmgr.h>
 
@@ -38,6 +39,8 @@ typedef struct {
 
 #define NET_BUFFER_SIZE 4*1024*1024
 #define FILE_BUFFER_SIZE 2*1024*1024
+#define RECV_BUFFER_SIZE 16 * 1024
+#define DECOM_BUFFER_SIZE 1024 * 1024
 #define TASK_MAX_SIZE 16
 
 static short server_started = 0;
@@ -55,7 +58,6 @@ static short network_port = 0;
 static int server_sockfd = 0;
 static int client_sockfd = 0;
 
-static int copy_confirm = 0;
 static int current_file_size = 0;
 static int current_file_flag = 0;
 static char current_file_name[256];
@@ -63,7 +65,12 @@ static char current_path[256];
 static int current_offset;
 static SceUID writing_file = -1;
 static int task_canceled = 0;
-int packet_count = 0;
+static z_stream comp_stream;
+static unsigned char* decom_buffer = NULL;
+
+static int vpk_status = 0;
+static long long vpk_size = 0;
+static long long vpk_size_finished = 0;
 
 static task_info tasks[TASK_MAX_SIZE];
 static short task_begin = 0;
@@ -73,33 +80,44 @@ static short task_end = 0;
 #define VTP_BEGIN_FILE 0x10
 #define VTP_FILE_CONTENT 0x11
 #define VTP_FILE_END 0x12
-
-#define VTP_INSTALL_VPK 0x20
-#define VTP_VPK_INNER_FILE 0x21
-#define VTP_VPK_INNER_FILE_CONTENT 0x22
-#define VTP_VPK_INNER_FILE_END 0x23
+#define VTP_INSTALL_VPK 0x13
+#define VTP_INSTALL_VPK_END 0x14
 
 // ==============================
 #define VTP_FLAG_RESTART 0x1
-#define VTP_FLAG_COMPRESSED 0x2
-#define VTP_FLAG_EXTRA_PERMISSION 0x4
+#define VTP_FLAG_COMPRESSED_ZLIB 0x2
+#define VTP_FLAG_COMPRESSED_LZMA 0x4
+#define VTP_FLAG_EXTRA_PERMISSION 0x8
 
 // ==============================
-#define VTPR_BEGIN_FILE 0x10
-#define VTPR_FILE_CONTINUE 0x11
-#define VTPR_FILE_END 0x12
+#define VTPR_BEGIN_FILE 0x18
+#define VTPR_FILE_CONTINUE 0x19
+#define VTPR_FILE_END 0x1A
+#define VTPR_INSTALL_VPK 0x1B
+#define VTPR_INSTALL_VPK_END 0x1C
 
 // ==============================
 #define TASK_WRITE_FILE 0x1
-#define TASK_WRITE_FILE_DECOM 0x2
+#define TASK_WRITE_FILE_ZLIB 0x2
+#define TASK_WRITE_FILE_LZMA 0x3
 
-static void wait_task_to_close() {
+static void wait_task_and_clear_status() {
     while(task_begin != task_end)
         sceKernelDelayThread(1000);
     if(writing_file > 0) {
         sceIoClose(writing_file);
         writing_file = -1;
+        if(current_file_flag & VTP_FLAG_COMPRESSED_ZLIB)
+            inflateEnd(&comp_stream);
+        if(decom_buffer)
+            free(decom_buffer);
     }
+    if(file_buffer) {
+        free(file_buffer);
+        file_buffer = NULL;
+    }
+    file_buffer_size = 0;
+    current_file_flag = 0;
 }
 
 static void task_callback(short type, int* args) {
@@ -117,7 +135,34 @@ static void task_callback(short type, int* args) {
             free((char*)args[0]);
             break;
         }
-        case TASK_WRITE_FILE_DECOM: {
+        case TASK_WRITE_FILE_ZLIB: {
+            unsigned char* buffer = (unsigned char*)args[0];
+            int buffer_size = args[1];            
+            if(writing_file > 0) {
+                comp_stream.next_in = buffer;
+                comp_stream.avail_in = buffer_size;
+                do {
+                    comp_stream.avail_out = DECOM_BUFFER_SIZE;
+                    comp_stream.next_out = decom_buffer;
+                    int res = inflate(&comp_stream, Z_NO_FLUSH);
+                    if(res > 1) {
+                        // todo: error stream
+                        break;
+                    }
+                    int out_sz = DECOM_BUFFER_SIZE - comp_stream.avail_out;
+                    if(out_sz > 0)
+                        sceIoWrite(writing_file, decom_buffer, out_sz);
+                } while(comp_stream.avail_out == 0);
+                char msgbuf[512];
+                double progress = (double)((100.0f * args[2]) / (double)current_file_size);
+                snprintf(msgbuf, 512, "%s\n%u/%u Bytes Finished.\n", current_file_name, args[2], current_file_size);
+                sceMsgDialogProgressBarSetMsg(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (const SceChar8*)msgbuf);
+		        sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (int)progress); 
+            }
+            free(buffer);
+            break;
+        }
+        case TASK_WRITE_FILE_LZMA: {
             free((char*)args[0]);
             break;
         }
@@ -165,50 +210,47 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
             memcpy(&current_file_flag, &data[4], 4);
             strncpy(current_file_name, &data[8], 256);
             current_file_name[255] = 0;
-            debugPrintf("receive file request: %s\n", current_file_name);
             while(dialog_step != DIALOG_STEP_NONE)
                 sceKernelDelayThread(1000);
             initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_WARNING]);
 			dialog_step = DIALOG_STEP_REMOTE_COPY_CONFIRM;
             while(dialog_step == DIALOG_STEP_REMOTE_COPY_CONFIRM)
                 sceKernelDelayThread(1000);
-            debugPrintf("confirmed.\n");
             if(dialog_step == DIALOG_STEP_CANCELLED) {
                 send_response(VTPR_BEGIN_FILE, 2); // user canceled
                 closeWaitDialog();
                 errorDialog(2);
             } else {
-                int pos = 0;
-                int slash_pos = -1;
-                while(current_file_name[pos] != 0) {
-                    if(current_file_name[pos] == '/' || current_file_name[pos] == ':')
-                        slash_pos = pos;
-                    pos++;
+                // create dir
+                int path_err = 0;
+                char* pdir = current_file_name;
+                while(*pdir != 0) {
+                    if(*pdir == '/') {
+                        *pdir = 0;
+                        int dirres = sceIoMkdir(current_file_name, 0777);
+                        if (dirres <= 0 && dirres != SCE_ERROR_ERRNO_EEXIST)
+                            path_err = 1;
+                        *pdir = '/';
+                        if(path_err)
+                            break;
+                    }
+                    pdir++;
                 }
-                if(slash_pos == -1) {
+                if(path_err) {
                     send_response(VTPR_BEGIN_FILE, 3); // path error
                     closeWaitDialog();
                     errorDialog(3);
                     break;
                 }
-                char pre_slash = current_file_name[slash_pos];
-                current_file_name[slash_pos] = 0;
-                debugPrintf("check dir: %s\n", current_file_name);
-                int dirres = sceIoMkdir(current_file_name, 0777);
-                if (dirres <= 0 && dirres != SCE_ERROR_ERRNO_EEXIST) {
-                    send_response(VTPR_BEGIN_FILE, 3); // path error
-                    closeWaitDialog();
-                    errorDialog(3);
-                    break;
-                }
-                current_file_name[slash_pos] = pre_slash;
-                debugPrintf("check file: %s\n", current_file_name);
-                if(current_file_flag & VTP_FLAG_RESTART)
+                // try open file
+                if(current_file_flag & VTP_FLAG_RESTART) {
                     writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
-                else {
+                    current_offset = 0;
+                } else {
                     writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
                     if(writing_file < 0)
                         writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+                    current_offset = sceIoLseek(writing_file, 0, SCE_SEEK_END);
                 }
                 if(writing_file < 0) {
                     send_response(VTPR_BEGIN_FILE, 4); // cannot open file
@@ -216,14 +258,18 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                     errorDialog(4);
                     break;
                 }
-                current_offset = sceIoLseek(writing_file, 0, SCE_SEEK_END);
                 send_response(VTPR_BEGIN_FILE, 0);
                 send_response(VTPR_FILE_CONTINUE, current_offset);
                 initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
 			    dialog_step = DIALOG_STEP_REMOTE_COPY;
                 task_canceled = 0;
-                packet_count = 0;
-                debugPrintf("begin receive file from %d.\n", current_offset);
+                file_buffer = malloc(FILE_BUFFER_SIZE);
+                file_buffer_size = 0;
+                if(current_file_flag & VTP_FLAG_COMPRESSED_ZLIB) {
+                    memset(&comp_stream, 0, sizeof(comp_stream));
+                    inflateInit(&comp_stream);
+                    decom_buffer = (unsigned char*)malloc(DECOM_BUFFER_SIZE);
+                }
             }
             break;
         }
@@ -232,23 +278,23 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                 break;
             if(task_canceled) {
                 send_response(VTPR_BEGIN_FILE, 2);
-                wait_task_to_close();
-                file_buffer_size = 0;
+                wait_task_and_clear_status();
                 break;
             }
             if(data_length > FILE_BUFFER_SIZE)
                 break;
             if(data_length == 0) {
                 // send offset
-                debugPrintf("receive offset request. pf=%d, pkt=%d\n", current_offset, packet_count);
                 send_response(VTPR_FILE_CONTINUE, current_offset);
             } else {
-                packet_count++;
                 if(file_buffer_size + data_length > FILE_BUFFER_SIZE) {
-                    debugPrintf("add writing task %d bytes. of=%d\n", file_buffer_size, current_offset);
-                    char* buffer = malloc(file_buffer_size);
-                    memcpy(buffer, file_buffer, file_buffer_size);
-                    add_task(TASK_WRITE_FILE, (int)buffer, file_buffer_size, current_offset);
+                    int taskid = TASK_WRITE_FILE;
+                    if(current_file_flag & VTP_FLAG_COMPRESSED_ZLIB)
+                        taskid = TASK_WRITE_FILE_ZLIB;
+                    if(current_file_flag & VTP_FLAG_COMPRESSED_LZMA)
+                        taskid = TASK_WRITE_FILE_LZMA;
+                    add_task(taskid, (int)file_buffer, file_buffer_size, current_offset);
+                    file_buffer = malloc(file_buffer_size);
                     file_buffer_size = 0;
                 }
                 memcpy(&file_buffer[file_buffer_size], data, data_length);
@@ -262,15 +308,31 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                 break;
             send_response(VTPR_FILE_END, 0);
             if(file_buffer_size > 0) {
-                char* buffer = malloc(file_buffer_size);
-                memcpy(buffer, file_buffer, file_buffer_size);
-                debugPrintf("add final writing task %d bytes\n", file_buffer_size);
-                add_task(TASK_WRITE_FILE, (int)buffer, file_buffer_size, current_offset);
+                int taskid = TASK_WRITE_FILE;
+                if(current_file_flag & VTP_FLAG_COMPRESSED_ZLIB)
+                    taskid = TASK_WRITE_FILE_ZLIB;
+                if(current_file_flag & VTP_FLAG_COMPRESSED_LZMA)
+                    taskid = TASK_WRITE_FILE_LZMA;
+                add_task(taskid, (int)file_buffer, file_buffer_size, current_offset);
+                file_buffer = NULL;
                 file_buffer_size = 0;
             }
+            wait_task_and_clear_status();
             closeWaitDialog();
-            debugPrintf("receive file end. pkt=%d offset=%d\n", packet_count, current_offset);
-            infoDialog("Remote Copy Finished.");
+            break;
+        }
+        case VTP_INSTALL_VPK: {
+            // int64 all_size
+            // int flag
+            if(vpk_status > 0) {
+                send_response(VTPR_INSTALL_VPK, 1); // VTP_INSTALL_VPK_END should be send before a new vpk
+                break;
+            }
+            break;
+        }
+        case VTP_INSTALL_VPK_END: {
+            if(vpk_status == 0)
+                break;
             break;
         }
     }
@@ -289,19 +351,14 @@ static int control_thread(SceSize args, void *argp) {
         goto exit;
     if(sceNetListen(server_sockfd, 128) != 0)
         goto exit;
-    file_buffer = malloc(FILE_BUFFER_SIZE);
-    file_buffer_size = 0;
+    char* recv_buffer = malloc(RECV_BUFFER_SIZE);
     while (1) {
         // only 1 remote manager is allowed
         SceNetSockaddrIn clientaddr;
         unsigned int addrlen = sizeof(clientaddr);
         client_sockfd = sceNetAccept(server_sockfd, (SceNetSockaddr *)&clientaddr, &addrlen);
         if (client_sockfd >= 0) {
-            debugPrintf("client connected.\n");
-            char recv_buffer[4096];
             int recv_offset = 0;
-            int hdr_size = 0;
-            int data_size = 0;
             pkt_header hdr;
             // begin recv
             while (1) {
@@ -319,40 +376,33 @@ static int control_thread(SceSize args, void *argp) {
                         };
                         if(hdr.length > left_data_size) {
                             // need receive more data
-                            memmove(recv_buffer, &recv_buffer[offset], left_data_size);
-                            recv_offset = left_data_size;
                             break;
                         }
                         handle_packet(hdr.type, &recv_buffer[offset + 4], hdr.length - 4);
                         offset += hdr.length;
-                        hdr_size += 4;
-                        data_size += hdr.length - 4;
                     }
+                    if(offset != recv_offset)
+                        memmove(recv_buffer, &recv_buffer[offset], recv_offset - offset);
+                    recv_offset -= offset;
                 } else {
                     // =0 -- connection closed
                     // <0 -- error
                     break;
                 }
             }
-            debugPrintf("client disconnected. hd=%d, ds=%d\n", hdr_size, data_size);
             sceNetSocketClose(client_sockfd);
             // clear status
-            current_file_size = 0;
-            current_file_flag = 0;
-            wait_task_to_close();
+            wait_task_and_clear_status();
         } else {
             // accept error
             break;
         }
     }
+    free(recv_buffer);
 exit:
-    if(file_buffer) {
-        free(file_buffer);
-        file_buffer = NULL;
-    }
-    file_buffer_size = 0;
+    if(server_sockfd != -1)
+        sceNetSocketClose(client_sockfd);
     server_started = 0;
-    infoDialog("Network Test end");
     sceKernelExitDeleteThread(0);
     return 0;
 }
@@ -463,7 +513,6 @@ int vitatp_end_server() {
 
 void check_and_run_remote_task() {
     while(task_begin != task_end) {
-        debugPrintf("run task %d / %d.\n", task_begin, task_end);
         task_callback(tasks[task_begin].type, tasks[task_begin].args);
         task_begin = (task_begin + 1) % TASK_MAX_SIZE;
     }
