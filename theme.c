@@ -29,7 +29,7 @@ extern unsigned char _binary_resources_image_icon_png_start;
 extern unsigned char _binary_resources_audio_icon_png_start;
 extern unsigned char _binary_resources_sfo_icon_png_start;
 extern unsigned char _binary_resources_text_icon_png_start;
-extern unsigned char _binary_resources_ftp_png_start;
+// extern unsigned char _binary_resources_ftp_png_start;
 extern unsigned char _binary_resources_battery_png_start;
 extern unsigned char _binary_resources_battery_bar_red_png_start;
 extern unsigned char _binary_resources_battery_bar_green_png_start;
@@ -63,7 +63,7 @@ int TEXT_LINE_NUMBER_COLOR;
 int TEXT_LINE_NUMBER_COLOR_FOCUS;
 
 vita2d_texture *folder_icon = NULL, *file_icon = NULL, *archive_icon = NULL, *image_icon = NULL, *audio_icon = NULL, *sfo_icon = NULL, *text_icon = NULL,
-			   *ftp_image = NULL, *dialog_image = NULL, *context_image = NULL, *context_more_image = NULL, *battery_image = NULL, *battery_bar_red_image = NULL,
+			   /* *ftp_image = NULL, */ *dialog_image = NULL, *context_image = NULL, *context_more_image = NULL, *battery_image = NULL, *battery_bar_red_image = NULL,
 			   *battery_bar_green_image = NULL, *battery_bar_charge_image = NULL, *bg_browser_image = NULL, *bg_hex_image = NULL,
 			   *bg_text_image = NULL, *bg_photo_image = NULL;
 
@@ -143,8 +143,8 @@ void loadTheme() {
 			snprintf(path, MAX_PATH_LENGTH, "ux0:VitaShell/theme/%s/text_icon.png", theme_name);
 			text_icon = vita2d_load_PNG_file(path);
 
-			snprintf(path, MAX_PATH_LENGTH, "ux0:VitaShell/theme/%s/ftp.png", theme_name);
-			ftp_image = vita2d_load_PNG_file(path);
+/*			snprintf(path, MAX_PATH_LENGTH, "ux0:VitaShell/theme/%s/ftp.png", theme_name);
+			ftp_image = vita2d_load_PNG_file(path);*/
 
 			snprintf(path, MAX_PATH_LENGTH, "ux0:VitaShell/theme/%s/dialog.png", theme_name);
 			dialog_image = vita2d_load_PNG_file(path);
@@ -223,8 +223,8 @@ void loadTheme() {
 	if (!text_icon)
 		text_icon = vita2d_load_PNG_buffer(&_binary_resources_text_icon_png_start);
 
-	if (!ftp_image)
-		ftp_image = vita2d_load_PNG_buffer(&_binary_resources_ftp_png_start);
+/*	if (!ftp_image)
+		ftp_image = vita2d_load_PNG_buffer(&_binary_resources_ftp_png_start);*/
 
 	if (!dialog_image) {
 		dialog_image = vita2d_create_empty_texture(SCREEN_WIDTH, SCREEN_HEIGHT);
