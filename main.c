@@ -390,9 +390,10 @@ void drawShellInfo(char *path) {
 	pgf_draw_text(date_time_x, SHELL_MARGIN_Y, DATE_TIME_COLOR, FONT_SIZE, string);
 
 	// FTP
-	if (ftpvita_is_initialized())
+	//if (ftpvita_is_initialized())
+	//	vita2d_draw_texture(ftp_image, date_time_x - 30.0f, SHELL_MARGIN_Y + 3.0f);
+	if (is_vitatp_running())
 		vita2d_draw_texture(ftp_image, date_time_x - 30.0f, SHELL_MARGIN_Y + 3.0f);
-
 	// TODO: make this more elegant
 	// Path
 	int line_width = 0;
@@ -1094,34 +1095,31 @@ void fileBrowserMenuCtrl() {
 
 	// FTP
 	if (pressed_buttons & SCE_CTRL_SELECT) {
-		if(current_buttons & SCE_CTRL_RTRIGGER) {
-			vitatp_begin_server(1340);
-		} else {
-			// Init FTP
-			if (!ftpvita_is_initialized()) {
-				int res = ftpvita_init(vita_ip, &vita_port);
-				if (res < 0) {
-					infoDialog(language_container[WIFI_ERROR]);
-				} else {
-					// Add all the current mountpoints to ftpvita
-					int i;
-					for (i = 0; i < getNumberMountPoints(); i++) {
-						char **mount_points = getMountPoints();
-						if (mount_points[i]) {
-							ftpvita_add_device(mount_points[i]);
-						}
-					}
-				}
+		// // Init FTP
+		// if (!ftpvita_is_initialized()) {
+		// 	int res = ftpvita_init(vita_ip, &vita_port);
+		// 	if (res < 0) {
+		// 		infoDialog(language_container[WIFI_ERROR]);
+		// 	} else {
+		// 		// Add all the current mountpoints to ftpvita
+		// 		int i;
+		// 		for (i = 0; i < getNumberMountPoints(); i++) {
+		// 			char **mount_points = getMountPoints();
+		// 			if (mount_points[i]) {
+		// 				ftpvita_add_device(mount_points[i]);
+		// 			}
+		// 		}
+		// 	}
 
-				// Lock power timers
-				powerLock();
-			}
-			// Dialog
-			if (ftpvita_is_initialized()) {
-				initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
-				dialog_step = DIALOG_STEP_FTP;
-			}
-		}
+		// 	// Lock power timers
+		// 	powerLock();
+		// }
+		// // Dialog
+		// if (ftpvita_is_initialized()) {
+		// 	initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
+		// 	dialog_step = DIALOG_STEP_FTP;
+		// }
+		show_control_thread_info();
 	}
 
 	// Move
@@ -1236,11 +1234,11 @@ int shellMain() {
 	resetFileLists();
 
 	while (1) {
+		int refresh = 0;
+
 		readPad();
 		if(!isUncommonDialogAnimating())
-			check_and_run_remote_task();
-
-		int refresh = 0;
+			refresh = check_and_run_remote_task();
 
 		// Control
 		if (dialog_step == DIALOG_STEP_NONE) {
@@ -1250,7 +1248,7 @@ int shellMain() {
 				fileBrowserMenuCtrl();
 			}
 		} else {
-			refresh = dialogSteps();
+			refresh = dialogSteps() || refresh;
 		}
 
 		// Receive system event
@@ -1441,6 +1439,8 @@ int main(int argc, const char *argv[]) {
 	SceUID thid = sceKernelCreateThread("network_update_thread", (SceKernelThreadEntry)network_update_thread, 0x40, 0x10000, 0, 0, NULL);
 	if (thid >= 0)
 		sceKernelStartThread(thid, 0, NULL);
+
+	vitatp_start_server(1340);
 
 	// Main
 	initShell();

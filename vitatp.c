@@ -15,6 +15,7 @@
 
 #include "main.h"
 #include "utils.h"
+#include "file.h"
 #include "io_process.h"
 #include "language.h"
 #include "message_dialog.h"
@@ -48,7 +49,6 @@ static void* net_buffer = NULL;
 static char* file_buffer = NULL;
 static int file_buffer_size = 0;
 
-static SceNetInAddr vita_addr;
 static SceUID server_thid;
 
 static int netctl_init = -1;
@@ -69,12 +69,14 @@ static z_stream comp_stream;
 static unsigned char* decom_buffer = NULL;
 
 static int vpk_status = 0;
+static int vpk_flag = 0;
 static long long vpk_size = 0;
 static long long vpk_size_finished = 0;
 
 static task_info tasks[TASK_MAX_SIZE];
 static short task_begin = 0;
 static short task_end = 0;
+static int need_refresh = 0;
 
 // ==============================
 #define VTP_BEGIN_FILE 0x10
@@ -101,7 +103,7 @@ static short task_end = 0;
 #define TASK_WRITE_FILE_ZLIB 0x2
 #define TASK_WRITE_FILE_LZMA 0x3
 
-static void wait_task_and_clear_status() {
+static void wait_task_and_close_file() {
     while(task_begin != task_end)
         sceKernelDelayThread(1000);
     if(writing_file > 0) {
@@ -120,17 +122,39 @@ static void wait_task_and_clear_status() {
     current_file_flag = 0;
 }
 
+static void wait_task_and_clear_status() {
+    wait_task_and_close_file();
+    vpk_status = 0;
+    closeWaitDialog();
+    powerUnlock();
+}
+
+static void UpdateProgress(int current_size) {
+    // char msgbuf[512];
+    if(vpk_status > 0) {
+        if(vpk_size == 0)
+            return;
+        double progress = (double)((100.0f * (vpk_size_finished + current_size)) / (double)(vpk_size));
+        // snprintf(msgbuf, 512, "%s\n%u / %u.\n", current_file_name, current_size, current_file_size);
+        // sceMsgDialogProgressBarSetMsg(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (const SceChar8*)msgbuf);
+        sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (int)progress);
+    } else {
+        if(current_file_size == 0)
+            return;
+        double progress = (double)((100.0f * current_size) / (double)current_file_size);
+        // snprintf(msgbuf, 512, "%s\n%u / %u.\n", current_file_name, current_size, current_file_size);
+        // sceMsgDialogProgressBarSetMsg(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (const SceChar8*)msgbuf);
+		sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (int)progress);
+    }
+}
+
 static void task_callback(short type, int* args) {
     switch(type) {
         case TASK_WRITE_FILE: {
             int buffer_size = args[1];
             if(writing_file > 0) {
-                char msgbuf[512];
                 sceIoWrite(writing_file, (char*)args[0], buffer_size);
-                double progress = (double)((100.0f * args[2]) / (double)current_file_size);
-                snprintf(msgbuf, 512, "%s\n%u/%u Bytes Finished.\n", current_file_name, args[2], current_file_size);
-                sceMsgDialogProgressBarSetMsg(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (const SceChar8*)msgbuf);
-		        sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (int)progress);                
+                UpdateProgress(args[2]);
             }
             free((char*)args[0]);
             break;
@@ -153,11 +177,7 @@ static void task_callback(short type, int* args) {
                     if(out_sz > 0)
                         sceIoWrite(writing_file, decom_buffer, out_sz);
                 } while(comp_stream.avail_out == 0);
-                char msgbuf[512];
-                double progress = (double)((100.0f * args[2]) / (double)current_file_size);
-                snprintf(msgbuf, 512, "%s\n%u/%u Bytes Finished.\n", current_file_name, args[2], current_file_size);
-                sceMsgDialogProgressBarSetMsg(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (const SceChar8*)msgbuf);
-		        sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, (int)progress); 
+                UpdateProgress(args[2]);
             }
             free(buffer);
             break;
@@ -210,66 +230,78 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
             memcpy(&current_file_flag, &data[4], 4);
             strncpy(current_file_name, &data[8], 256);
             current_file_name[255] = 0;
-            while(dialog_step != DIALOG_STEP_NONE)
-                sceKernelDelayThread(1000);
-            initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_WARNING]);
-			dialog_step = DIALOG_STEP_REMOTE_COPY_CONFIRM;
-            while(dialog_step == DIALOG_STEP_REMOTE_COPY_CONFIRM)
-                sceKernelDelayThread(1000);
-            if(dialog_step == DIALOG_STEP_CANCELLED) {
-                send_response(VTPR_BEGIN_FILE, 2); // user canceled
-                closeWaitDialog();
-                errorDialog(2);
-            } else {
-                // create dir
-                int path_err = 0;
-                char* pdir = current_file_name;
-                while(*pdir != 0) {
-                    if(*pdir == '/') {
-                        *pdir = 0;
-                        int dirres = sceIoMkdir(current_file_name, 0777);
-                        if (dirres <= 0 && dirres != SCE_ERROR_ERRNO_EEXIST)
-                            path_err = 1;
-                        *pdir = '/';
-                        if(path_err)
-                            break;
+            // if(vpk_status == 0) {
+            //     while(dialog_step != DIALOG_STEP_NONE)
+            //         sceKernelDelayThread(1000);
+            //     initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_WARNING]);
+            //     dialog_step = DIALOG_STEP_REMOTE_COPY_CONFIRM;
+            //     while(dialog_step == DIALOG_STEP_REMOTE_COPY_CONFIRM)
+            //         sceKernelDelayThread(1000);
+            //     if(dialog_step == DIALOG_STEP_CANCELLED) {
+            //         send_response(VTPR_BEGIN_FILE, 2); // user canceled
+            //         closeWaitDialog();
+            //         errorDialog(-1);
+            //         break;
+            //     }
+            // }
+
+            // create dir
+            int path_err = 0;
+            char* pdir = current_file_name;
+            while(*pdir != 0) {
+                if(*pdir == '/') {
+                    *pdir = 0;
+                    int dirres = sceIoMkdir(current_file_name, 0777);
+                    if (dirres < 0 && dirres != SCE_ERROR_ERRNO_EEXIST) {
+                        path_err = 1;
                     }
-                    pdir++;
+                    *pdir = '/';
+                    if(path_err)
+                        break;
                 }
-                if(path_err) {
-                    send_response(VTPR_BEGIN_FILE, 3); // path error
+                pdir++;
+            }
+            if(path_err) {
+                send_response(VTPR_BEGIN_FILE, 3); // path error
+                if(vpk_status == 0) {
                     closeWaitDialog();
-                    errorDialog(3);
-                    break;
+                    errorDialog(-1);
                 }
-                // try open file
-                if(current_file_flag & VTP_FLAG_RESTART) {
+                break;
+            }
+            // try open file
+            if(current_file_flag & VTP_FLAG_RESTART) {
+                writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+                current_offset = 0;
+            } else {
+                writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+                if(writing_file < 0)
                     writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
-                    current_offset = 0;
-                } else {
-                    writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
-                    if(writing_file < 0)
-                        writing_file = sceIoOpen(current_file_name, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
-                    current_offset = sceIoLseek(writing_file, 0, SCE_SEEK_END);
-                }
-                if(writing_file < 0) {
-                    send_response(VTPR_BEGIN_FILE, 4); // cannot open file
+                current_offset = sceIoLseek(writing_file, 0, SCE_SEEK_END);
+            }
+            if(writing_file < 0) {
+                send_response(VTPR_BEGIN_FILE, 4); // cannot open file
+                if(vpk_status == 0) {
                     closeWaitDialog();
-                    errorDialog(4);
-                    break;
+                    errorDialog(-1);
                 }
-                send_response(VTPR_BEGIN_FILE, 0);
-                send_response(VTPR_FILE_CONTINUE, current_offset);
-                initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
-			    dialog_step = DIALOG_STEP_REMOTE_COPY;
-                task_canceled = 0;
-                file_buffer = malloc(FILE_BUFFER_SIZE);
-                file_buffer_size = 0;
-                if(current_file_flag & VTP_FLAG_COMPRESSED_ZLIB) {
-                    memset(&comp_stream, 0, sizeof(comp_stream));
-                    inflateInit(&comp_stream);
-                    decom_buffer = (unsigned char*)malloc(DECOM_BUFFER_SIZE);
-                }
+                break;
+            }
+            send_response(VTPR_BEGIN_FILE, 0);
+            send_response(VTPR_FILE_CONTINUE, current_offset);
+            if(vpk_status == 0) {
+                initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[COPYING]);
+                dialog_step = DIALOG_STEP_REMOTE_COPY;
+                powerLock();
+            }
+            task_canceled = 0;
+            file_buffer = malloc(FILE_BUFFER_SIZE);
+            file_buffer_size = 0;
+            if(current_file_flag & VTP_FLAG_COMPRESSED_ZLIB) {
+                memset(&comp_stream, 0, sizeof(comp_stream));
+                // inflate raw data
+                inflateInit2(&comp_stream, -15);
+                decom_buffer = (unsigned char*)malloc(DECOM_BUFFER_SIZE);
             }
             break;
         }
@@ -317,22 +349,75 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                 file_buffer = NULL;
                 file_buffer_size = 0;
             }
-            wait_task_and_clear_status();
-            closeWaitDialog();
+            wait_task_and_close_file();
+            if(vpk_status == 0) {
+                sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, 100);
+                sceKernelDelayThread(COUNTUP_WAIT);
+                closeWaitDialog();
+                powerUnlock();
+                need_refresh = 1;
+            } else {
+                vpk_size_finished += current_file_size;
+                UpdateProgress(0);
+            }
             break;
         }
         case VTP_INSTALL_VPK: {
             // int64 all_size
             // int flag
+            if(data_length < 12)
+                break;
             if(vpk_status > 0) {
                 send_response(VTPR_INSTALL_VPK, 1); // VTP_INSTALL_VPK_END should be send before a new vpk
                 break;
+            }
+            while(dialog_step != DIALOG_STEP_NONE)
+                sceKernelDelayThread(1000);
+            memcpy(&vpk_size, data, 8);
+            memcpy(&vpk_flag, &data[8], 4);
+            if(vpk_flag & VTP_FLAG_EXTRA_PERMISSION) {
+                initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_WARNING]);
+            } else {
+                initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_QUESTION]);
+            }
+			dialog_step = DIALOG_STEP_REMOTE_COPY_CONFIRM;
+            while(dialog_step == DIALOG_STEP_REMOTE_COPY_CONFIRM)
+                sceKernelDelayThread(1000);
+            if(dialog_step == DIALOG_STEP_CANCELLED) {
+                send_response(VTPR_INSTALL_VPK, 2); // user canceled
+                break;
+            } else {
+                vpk_status = 1;
+                removePath(PACKAGE_PARENT, NULL, 0, NULL, NULL);
+	            sceIoMkdir(PACKAGE_PARENT, 0777);
+                send_response(VTPR_INSTALL_VPK, 0);
+                initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
+                dialog_step = DIALOG_STEP_REMOTE_COPY;
+                powerLock();
             }
             break;
         }
         case VTP_INSTALL_VPK_END: {
             if(vpk_status == 0)
                 break;
+            vpk_status = 0;
+            if (makeHeadBin() < 0) {
+                closeWaitDialog();
+                errorDialog(-1);
+                break;
+            }
+            if (promote(PACKAGE_DIR) < 0) {
+                closeWaitDialog();
+                errorDialog(-1);
+                break;
+            }
+            send_response(VTPR_INSTALL_VPK_END, 0);
+            sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, 100);
+            sceKernelDelayThread(COUNTUP_WAIT);
+            closeWaitDialog();
+            sceKernelDelayThread(DIALOG_WAIT);
+            infoDialog("Remote install success");
+            powerUnlock();
             break;
         }
     }
@@ -351,6 +436,12 @@ static int control_thread(SceSize args, void *argp) {
         goto exit;
     if(sceNetListen(server_sockfd, 128) != 0)
         goto exit;
+
+    SceNetCtlInfo info;
+    sceNetCtlInetGetInfo(SCE_NETCTL_INFO_GET_IP_ADDRESS, &info);
+    strcpy(network_ip, info.ip_address);
+
+    server_started = 1;
     char* recv_buffer = malloc(RECV_BUFFER_SIZE);
     while (1) {
         // only 1 remote manager is allowed
@@ -401,24 +492,30 @@ static int control_thread(SceSize args, void *argp) {
     free(recv_buffer);
 exit:
     if(server_sockfd != -1)
-        sceNetSocketClose(client_sockfd);
+        sceNetSocketClose(server_sockfd);
     server_started = 0;
     sceKernelExitDeleteThread(0);
     return 0;
 }
 
-int vitatp_begin_server(short port) {
-    int ret;
-    int i;
-    SceNetInitParam initparam;
-    SceNetCtlInfo info;
-
-    if (server_started) {
-        return -1;
+static int control_thread_daemon(SceSize args, void *argp) {
+    while(1) {
+        if(server_started == 0) {
+            server_thid = sceKernelCreateThread("remote_control_thread",
+                control_thread, 0x10000100, 0x10000, 0, 0, NULL);
+            sceKernelStartThread(server_thid, 0, NULL);
+        }
+        sceKernelDelayThread(500 * 1000);
     }
+    // useless
+    return 0;
+}
 
-    /* Init Net */
-    ret = sceNetShowNetstat();
+void vitatp_start_server(short port) {
+    SceNetInitParam initparam;
+
+    // Init Net
+    int ret = sceNetShowNetstat();
     if (ret == 0) {
         net_init = -1;
     } else if (ret == SCE_NET_ERROR_ENOTINIT) {
@@ -435,42 +532,21 @@ int vitatp_begin_server(short port) {
         goto error_netstat;
     }
 
-    /* Init NetCtl */
-    ret = netctl_init = sceNetCtlInit();
+    // Init NetCtl
+    netctl_init = sceNetCtlInit();
     // 0x80412102 = NET_CTL_ERROR_NOT_TERMINATED
     if (netctl_init < 0 && netctl_init != 0x80412102)
         goto error_netctlinit;
 
-    /* Get IP address */
-    ret = sceNetCtlInetGetInfo(SCE_NETCTL_INFO_GET_IP_ADDRESS, &info);
-    if (ret < 0)
-        goto error_netctlgetinfo;
-
-    /* Return data */
-    strcpy(network_ip, info.ip_address);
-
-    /* Save the IP of PSVita to a global variable */
-    sceNetInetPton(SCE_NET_AF_INET, info.ip_address, &vita_addr);
-
-    /* Create server thread */
-    server_thid = sceKernelCreateThread("remote_control_thread",
-        control_thread, 0x10000100, 0x10000, 0, 0, NULL);
-
     network_port = port;
 
-    /* Start the server thread */
-    infoDialog("Network Test begin");
-    sceKernelStartThread(server_thid, 0, NULL);
+    // Create control thread daemon
+    SceUID daemon_id = sceKernelCreateThread("remote_control_thread_daemon",
+        control_thread_daemon, 0x10000100, 0x10000, 0, 0, NULL);
+    sceKernelStartThread(daemon_id, 0, NULL);
 
-    server_started = 1;
+    return;
 
-    return 0;
-
-error_netctlgetinfo:
-    if (netctl_init == 0) {
-        sceNetCtlTerm();
-        netctl_init = -1;
-    }
 error_netctlinit:
     if (net_init == 0) {
         sceNetTerm();
@@ -482,40 +558,20 @@ error_netinit:
         net_buffer = NULL;
     }
 error_netstat:
-    infoDialog("Network Test error.");
-    return ret;
+    debugPrintf("network setting error.\n");
+    return;
 }
 
-int vitatp_end_server() {
-    if (!server_started)
-        return -1;
-    /* In order to "stop" the blocking sceNetAccept,
-    * we have to close the server socket; this way
-    * the accept call will return an error */
-    sceNetSocketClose(server_sockfd);
-
-    /* Wait until the server threads ends */
-    sceKernelWaitThreadEnd(server_thid, NULL, NULL);
-
-    if (netctl_init == 0)
-        sceNetCtlTerm();
-    if (net_init == 0)
-        sceNetTerm();
-    if (net_buffer)
-        free(net_buffer);
-
-    netctl_init = -1;
-    net_init = -1;
-    net_buffer = NULL;
-    server_started = 0;
-    return 0;
-}
-
-void check_and_run_remote_task() {
+int check_and_run_remote_task() {
     while(task_begin != task_end) {
         task_callback(tasks[task_begin].type, tasks[task_begin].args);
         task_begin = (task_begin + 1) % TASK_MAX_SIZE;
     }
+    if(need_refresh) {
+        need_refresh = 0;
+        return 1;
+    }
+    return 0;
 }
 
 int is_vitatp_running() {
@@ -524,4 +580,8 @@ int is_vitatp_running() {
 
 void vitatp_cancel_current_task() {
     task_canceled = 1;
+}
+
+void show_control_thread_info() {
+    infoDialog("%s:%d", network_ip, network_port);
 }
