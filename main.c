@@ -19,14 +19,9 @@
 /*
 	TODO:
 	- Hide mount points
-	- Network update
 	- Context menu: 'More' entry
 	- Inverse sort, sort by date, size
-	- vita2dlib: Handle big images > 4096
-	- Page skip for text viewer
 	- Hex editor byte group size
-	- Moving destination folder to subfolder of source folder prevention
-	- Moving a folder to a location where the folder does already exit causes error, so move its content.
 	- Duplicate when same location or same name. /lol to /lol - Backup. or overwrite question.
 	- Shortcuts
 	- CPU changement
@@ -79,8 +74,10 @@ static int dir_level_archive = -1;
 // Context menu
 static int ctx_menu_mode = CONTEXT_MENU_CLOSED;
 static int ctx_menu_pos = -1;
+static int ctx_menu_more_pos = -1;
 static float ctx_menu_width = 0;
 static float ctx_menu_max_width = 0;
+static float ctx_menu_more_max_width = 0;
 
 // Net info
 static SceNetEtherAddr mac;
@@ -392,8 +389,8 @@ void drawShellInfo(char *path) {
 	// FTP
 	//if (ftpvita_is_initialized())
 	//	vita2d_draw_texture(ftp_image, date_time_x - 30.0f, SHELL_MARGIN_Y + 3.0f);
-	if (is_vitatp_running())
-		vita2d_draw_texture(ftp_image, date_time_x - 30.0f, SHELL_MARGIN_Y + 3.0f);
+	// if (is_vitatp_running())
+	//	vita2d_draw_texture(ftp_image, date_time_x - 30.0f, SHELL_MARGIN_Y + 3.0f);
 	// TODO: make this more elegant
 	// Path
 	int line_width = 0;
@@ -442,7 +439,6 @@ void drawShellInfo(char *path) {
 }
 
 enum MenuEntrys {
-	MENU_ENTRY_INSTALL_ALL,
 	MENU_ENTRY_MARK_UNMARK_ALL,	
 	MENU_ENTRY_EMPTY_1,
 	MENU_ENTRY_MOVE,
@@ -453,22 +449,12 @@ enum MenuEntrys {
 	MENU_ENTRY_RENAME,
 	MENU_ENTRY_EMPTY_4,
 	MENU_ENTRY_NEW_FOLDER,
+	MENU_ENTRY_EMPTY_5,
+	MENU_ENTRY_MORE,
 };
-
-enum MenuVisibilities {
-	VISIBILITY_UNUSED,
-	VISIBILITY_INVISIBLE,
-	VISIBILITY_VISIBLE,
-};
-
-typedef struct {
-	int name;
-	int visibility;
-} MenuEntry;
 
 MenuEntry menu_entries[] = {
-	{ INSTALL_ALL, VISIBILITY_INVISIBLE },
-	{ MARK_ALL, VISIBILITY_INVISIBLE },	
+	{ MARK_ALL, VISIBILITY_INVISIBLE },
 	{ -1, VISIBILITY_UNUSED },
 	{ MOVE, VISIBILITY_INVISIBLE },
 	{ COPY, VISIBILITY_INVISIBLE },
@@ -478,9 +464,23 @@ MenuEntry menu_entries[] = {
 	{ RENAME, VISIBILITY_INVISIBLE },
 	{ -1, VISIBILITY_UNUSED },
 	{ NEW_FOLDER, VISIBILITY_INVISIBLE },
+	{ -1, VISIBILITY_UNUSED },
+	{ MORE, VISIBILITY_INVISIBLE }
 };
 
 #define N_MENU_ENTRIES (sizeof(menu_entries) / sizeof(MenuEntry))
+
+enum MenuMoreEntrys {
+	MENU_MORE_ENTRY_INSTALL_ALL,
+	MENU_MORE_ENTRY_CALCULATE_SHA1,
+};
+
+MenuEntry menu_more_entries[] = {
+	{ INSTALL_ALL, VISIBILITY_INVISIBLE },
+	{ CALCULATE_SHA1, VISIBILITY_INVISIBLE },
+};
+
+#define N_MENU_MORE_ENTRIES (sizeof(menu_more_entries) / sizeof(MenuEntry))
 
 void initContextMenu() {
 	int i;
@@ -500,11 +500,29 @@ void initContextMenu() {
 		menu_entries[MENU_ENTRY_COPY].visibility = VISIBILITY_INVISIBLE;
 		menu_entries[MENU_ENTRY_DELETE].visibility = VISIBILITY_INVISIBLE;
 		menu_entries[MENU_ENTRY_RENAME].visibility = VISIBILITY_INVISIBLE;
+		//menu_entries[MENU_ENTRY_SHA1].visibility = VISIBILITY_INVISIBLE;
 	}
 
 	// Invisible 'Paste' if nothing is copied yet
 	if (copy_list.length == 0)
 		menu_entries[MENU_ENTRY_PASTE].visibility = VISIBILITY_INVISIBLE;
+
+	// Invisible 'Paste' if the files to move are not from the same partition
+	char *p = strchr(file_list.path, ':');
+	char *q = strchr(copy_list.path, ':');
+	if (p && q) {
+		*p = '\0';
+		*q = '\0';
+
+		if (strcasecmp(file_list.path, copy_list.path) != 0) {
+			menu_entries[MENU_ENTRY_PASTE].visibility = VISIBILITY_INVISIBLE;
+		}
+
+		*q = ':';
+		*p = ':';
+	} else {
+		menu_entries[MENU_ENTRY_PASTE].visibility = VISIBILITY_INVISIBLE;
+	}
 
 	// Invisble write operations in archives
 	if (isInArchive()) { // TODO: read-only mount points
@@ -514,12 +532,6 @@ void initContextMenu() {
 		menu_entries[MENU_ENTRY_RENAME].visibility = VISIBILITY_INVISIBLE;
 		menu_entries[MENU_ENTRY_NEW_FOLDER].visibility = VISIBILITY_INVISIBLE;
 	}
-
-	if(file_entry->type != FILE_TYPE_VPK) {
-		menu_entries[MENU_ENTRY_INSTALL_ALL].visibility = VISIBILITY_INVISIBLE;
-	}
-
-	// TODO: Moving from one mount point to another is not possible
 
 	// Mark/Unmark all text
 	if (mark_list.length == (file_list.length - 1)) { // All marked
@@ -545,13 +557,49 @@ void initContextMenu() {
 		ctx_menu_pos = -1;
 }
 
+void initContextMenuMore() {
+	int i;
+
+	// All visible
+	for (i = 0; i < N_MENU_MORE_ENTRIES; i++) {
+		if (menu_more_entries[i].visibility == VISIBILITY_INVISIBLE)
+			menu_more_entries[i].visibility = VISIBILITY_VISIBLE;
+	}
+
+	FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
+
+	// Invisble write operations in archives
+	if (isInArchive()) {
+		menu_more_entries[MENU_MORE_ENTRY_CALCULATE_SHA1].visibility  = VISIBILITY_INVISIBLE;
+	}
+
+	if(file_entry->is_folder) {
+		menu_more_entries[MENU_MORE_ENTRY_CALCULATE_SHA1].visibility = VISIBILITY_INVISIBLE;
+	}
+
+	if(file_entry->type != FILE_TYPE_VPK) {
+		menu_more_entries[MENU_MORE_ENTRY_INSTALL_ALL].visibility = VISIBILITY_INVISIBLE;
+	}
+
+	// Go to first entry
+	for (i = 0; i < N_MENU_MORE_ENTRIES; i++) {
+		if (menu_more_entries[i].visibility == VISIBILITY_VISIBLE) {
+			ctx_menu_more_pos = i;
+			break;
+		}
+	}
+
+	if (i == N_MENU_MORE_ENTRIES)
+		ctx_menu_more_pos = -1;
+}
+
 float easeOut(float x0, float x1, float a) {
 	float dx = (x1 - x0);
 	return ((dx * a) > 0.5f) ? (dx * a) : dx;
 }
 
 void drawContextMenu() {
-	// Easing out
+	// Closing context menu
 	if (ctx_menu_mode == CONTEXT_MENU_CLOSING) {
 		if (ctx_menu_width > 0.0f) {
 			ctx_menu_width -= easeOut(0.0f, ctx_menu_width, 0.375f);
@@ -560,6 +608,7 @@ void drawContextMenu() {
 		}
 	}
 
+	// Opening context menu
 	if (ctx_menu_mode == CONTEXT_MENU_OPENING) {
 		if (ctx_menu_width < ctx_menu_max_width) {
 			ctx_menu_width += easeOut(ctx_menu_width, ctx_menu_max_width, 0.375f);
@@ -568,9 +617,32 @@ void drawContextMenu() {
 		}
 	}
 
+	// Closing context menu 'More'
+	if (ctx_menu_mode == CONTEXT_MENU_MORE_CLOSING) {
+		if (ctx_menu_width > ctx_menu_max_width) {
+			ctx_menu_width -= easeOut(ctx_menu_max_width, ctx_menu_width, 0.375f);
+		} else {
+			ctx_menu_mode = CONTEXT_MENU_MORE_CLOSED;
+		}
+	}
+
+	// Opening context menu 'More'
+	if (ctx_menu_mode == CONTEXT_MENU_MORE_OPENING) {
+		if (ctx_menu_width < ctx_menu_max_width + ctx_menu_more_max_width) {
+			ctx_menu_width += easeOut(ctx_menu_width, ctx_menu_max_width + ctx_menu_more_max_width, 0.375f);
+		} else {
+			ctx_menu_mode = CONTEXT_MENU_MORE_OPENED;
+		}
+	}
+
 	// Draw context menu
 	if (ctx_menu_mode != CONTEXT_MENU_CLOSED) {
-		vita2d_draw_texture_part(context_image, SCREEN_WIDTH - ctx_menu_width, 0.0f, 0.0f, 0.0f, ctx_menu_width, SCREEN_HEIGHT);
+		if (ctx_menu_width < ctx_menu_max_width) {
+			vita2d_draw_texture_part(context_image, SCREEN_WIDTH - ctx_menu_width, 0.0f, 0.0f, 0.0f, ctx_menu_width, SCREEN_HEIGHT);
+		} else {
+			vita2d_draw_texture_part(context_image, SCREEN_WIDTH - ctx_menu_width, 0.0f, 0.0f, 0.0f, ctx_menu_max_width, SCREEN_HEIGHT);
+			vita2d_draw_texture_part(context_more_image, SCREEN_WIDTH - ctx_menu_width + ctx_menu_max_width, 0.0f, 0.0f, 0.0f, ctx_menu_more_max_width, SCREEN_HEIGHT);
+		}
 
 		int i;
 		for (i = 0; i < N_MENU_ENTRIES; i++) {
@@ -581,230 +653,325 @@ void drawContextMenu() {
 
 			uint32_t color = GENERAL_COLOR;
 
-			if (i == ctx_menu_pos)
-				color = FOCUS_COLOR;
+			if (i == ctx_menu_pos) {
+				if (ctx_menu_mode != CONTEXT_MENU_MORE_OPENED && ctx_menu_mode != CONTEXT_MENU_MORE_OPENING) {
+					color = FOCUS_COLOR;
+				}
+			}
 
 			if (menu_entries[i].visibility == VISIBILITY_INVISIBLE)
 				color = INVISIBLE_COLOR;
 
 			pgf_draw_text(SCREEN_WIDTH - ctx_menu_width + CONTEXT_MENU_MARGIN, y, color, FONT_SIZE, language_container[menu_entries[i].name]);
 		}
+
+		if (ctx_menu_mode == CONTEXT_MENU_MORE_CLOSING || ctx_menu_mode == CONTEXT_MENU_MORE_OPENED || ctx_menu_mode == CONTEXT_MENU_MORE_OPENING) {
+			for (i = 0; i < N_MENU_MORE_ENTRIES; i++) {
+				if (menu_more_entries[i].visibility == VISIBILITY_UNUSED)
+					continue;
+
+				float y = START_Y + ((MENU_ENTRY_MORE + i) * FONT_Y_SPACE);
+
+				uint32_t color = GENERAL_COLOR;
+
+				if (i == ctx_menu_more_pos) {
+					if (ctx_menu_mode != CONTEXT_MENU_MORE_CLOSING) {
+						color = FOCUS_COLOR;
+					}
+				}
+
+				if (menu_more_entries[i].visibility == VISIBILITY_INVISIBLE)
+					color = INVISIBLE_COLOR;
+
+				pgf_draw_text(SCREEN_WIDTH - ctx_menu_width + ctx_menu_max_width + CONTEXT_MENU_MARGIN, y, color, FONT_SIZE, language_container[menu_more_entries[i].name]);
+			}
+		}
 	}
 }
 
 void contextMenuCtrl() {
 	if (hold_buttons & SCE_CTRL_UP || hold2_buttons & SCE_CTRL_LEFT_ANALOG_UP) {
-		int i;
-		for (i = N_MENU_ENTRIES - 1; i >= 0; i--) {
-			if (menu_entries[i].visibility == VISIBILITY_VISIBLE) {
-				if (i < ctx_menu_pos) {
-					ctx_menu_pos = i;
-					break;
+		if (ctx_menu_mode == CONTEXT_MENU_OPENED) {
+			int i;
+			for (i = N_MENU_ENTRIES - 1; i >= 0; i--) {
+				if (menu_entries[i].visibility == VISIBILITY_VISIBLE) {
+					if (i < ctx_menu_pos) {
+						ctx_menu_pos = i;
+						break;
+					}
+				}
+			}
+		} else if (ctx_menu_mode == CONTEXT_MENU_MORE_OPENED) {
+			int i;
+			for (i = N_MENU_MORE_ENTRIES - 1; i >= 0; i--) {
+				if (menu_more_entries[i].visibility == VISIBILITY_VISIBLE) {
+					if (i < ctx_menu_more_pos) {
+						ctx_menu_more_pos = i;
+						break;
+					}
 				}
 			}
 		}
 	} else if (hold_buttons & SCE_CTRL_DOWN || hold2_buttons & SCE_CTRL_LEFT_ANALOG_DOWN) {
-		int i;
-		for (i = 0; i < N_MENU_ENTRIES; i++) {
-			if (menu_entries[i].visibility == VISIBILITY_VISIBLE) {
-				if (i > ctx_menu_pos) {
-					ctx_menu_pos = i;
-					break;
+		if (ctx_menu_mode == CONTEXT_MENU_OPENED) {
+			int i;
+			for (i = 0; i < N_MENU_ENTRIES; i++) {
+				if (menu_entries[i].visibility == VISIBILITY_VISIBLE) {
+					if (i > ctx_menu_pos) {
+						ctx_menu_pos = i;
+						break;
+					}
+				}
+			}
+		} else {
+			int i;
+			for (i = 0; i < N_MENU_MORE_ENTRIES; i++) {
+				if (menu_more_entries[i].visibility == VISIBILITY_VISIBLE) {
+					if (i > ctx_menu_more_pos) {
+						ctx_menu_more_pos = i;
+						break;
+					}
 				}
 			}
 		}
 	}
 
-	// Back
-	if (pressed_buttons & SCE_CTRL_TRIANGLE || pressed_buttons & SCE_CTRL_CANCEL) {
+	// Close
+	if (pressed_buttons & SCE_CTRL_TRIANGLE) {
 		ctx_menu_mode = CONTEXT_MENU_CLOSING;
+	}
+
+	// Back
+	if (pressed_buttons & SCE_CTRL_CANCEL) {
+		if (ctx_menu_mode == CONTEXT_MENU_MORE_OPENED) {
+			ctx_menu_mode = CONTEXT_MENU_MORE_CLOSING;
+		} else {
+			ctx_menu_mode = CONTEXT_MENU_CLOSING;
+		}
 	}
 
 	// Handle
 	if (pressed_buttons & SCE_CTRL_ENTER) {
-		switch (ctx_menu_pos) {
-			case MENU_ENTRY_MARK_UNMARK_ALL:
-			{
-				int on_marked_entry = 0;
-				int length = mark_list.length;
+		if (ctx_menu_mode == CONTEXT_MENU_OPENED) {
+			switch (ctx_menu_pos) {
+				case MENU_ENTRY_MARK_UNMARK_ALL:
+				{
+					int on_marked_entry = 0;
+					int length = mark_list.length;
 
-				FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
-				if (fileListFindEntry(&mark_list, file_entry->name))
-					on_marked_entry = 1;
+					FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
+					if (fileListFindEntry(&mark_list, file_entry->name))
+						on_marked_entry = 1;
 
-				// Empty mark list
-				fileListEmpty(&mark_list);
+					// Empty mark list
+					fileListEmpty(&mark_list);
 
-				// Mark all if not all entries are marked yet and we are not focusing on a marked entry
-				if (length != (file_list.length - 1) && !on_marked_entry) {
+					// Mark all if not all entries are marked yet and we are not focusing on a marked entry
+					if (length != (file_list.length - 1) && !on_marked_entry) {
+						FileListEntry *file_entry = file_list.head->next; // Ignore '..'
+
+						int i;
+						for (i = 0; i < file_list.length - 1; i++) {
+							FileListEntry *mark_entry = malloc(sizeof(FileListEntry));
+							memcpy(mark_entry, file_entry, sizeof(FileListEntry));
+							fileListAddEntry(&mark_list, mark_entry, SORT_NONE);
+
+							// Next
+							file_entry = file_entry->next;
+						}
+					}
+
+					break;
+				}
+				
+				case MENU_ENTRY_MOVE:
+				case MENU_ENTRY_COPY:
+				{
+					// Mode
+					if (ctx_menu_pos == MENU_ENTRY_MOVE) {
+						copy_mode = COPY_MODE_MOVE;
+					} else {
+						copy_mode = isInArchive() ? COPY_MODE_EXTRACT : COPY_MODE_NORMAL;
+					}
+
+					// Empty copy list at first
+					if (copy_list.length > 0)
+						fileListEmpty(&copy_list);
+
+					FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
+
+					// Paths
+					if (fileListFindEntry(&mark_list, file_entry->name)) { // On marked entry
+						// Copy mark list to copy list
+						FileListEntry *mark_entry = mark_list.head;
+
+						int i;
+						for (i = 0; i < mark_list.length; i++) {
+							FileListEntry *copy_entry = malloc(sizeof(FileListEntry));
+							memcpy(copy_entry, mark_entry, sizeof(FileListEntry));
+							fileListAddEntry(&copy_list, copy_entry, SORT_NONE);
+
+							// Next
+							mark_entry = mark_entry->next;
+						}
+					} else {
+						FileListEntry *copy_entry = malloc(sizeof(FileListEntry));
+						memcpy(copy_entry, file_entry, sizeof(FileListEntry));
+						fileListAddEntry(&copy_list, copy_entry, SORT_NONE);
+					}
+
+					strcpy(copy_list.path, file_list.path);
+
+					char *message;
+
+					// On marked entry
+					if (fileListFindEntry(&copy_list, file_entry->name)) {
+						if (copy_list.length == 1) {
+							message = language_container[file_entry->is_folder ? COPIED_FOLDER : COPIED_FILE];
+						} else {
+							message = language_container[COPIED_FILES_FOLDERS];
+						}
+					} else {
+						message = language_container[file_entry->is_folder ? COPIED_FOLDER : COPIED_FILE];
+					}
+
+					// Copy message
+					infoDialog(message, copy_list.length);
+
+					break;
+				}
+
+				case MENU_ENTRY_PASTE:
+				{
+					int copy_text = 0;
+
+					switch (copy_mode) {
+						case COPY_MODE_NORMAL:
+							copy_text = COPYING;
+							break;
+							
+						case COPY_MODE_MOVE:
+							copy_text = MOVING;
+							break;
+							
+						case COPY_MODE_EXTRACT:
+							copy_text = EXTRACTING;
+							break;
+					}
+
+					initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[copy_text]);
+					dialog_step = DIALOG_STEP_PASTE;
+					break;
+				}
+
+				case MENU_ENTRY_DELETE:
+				{
+					char *message;
+
+					FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
+
+					// On marked entry
+					if (fileListFindEntry(&mark_list, file_entry->name)) {
+						if (mark_list.length == 1) {
+							message = language_container[file_entry->is_folder ? DELETE_FOLDER_QUESTION : DELETE_FILE_QUESTION];
+						} else {
+							message = language_container[DELETE_FILES_FOLDERS_QUESTION];
+						}
+					} else {
+						message = language_container[file_entry->is_folder ? DELETE_FOLDER_QUESTION : DELETE_FILE_QUESTION];
+					}
+
+					initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, message);
+					dialog_step = DIALOG_STEP_DELETE_QUESTION;
+					break;
+				}
+
+				case MENU_ENTRY_RENAME:
+				{
+					FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
+
+					char name[MAX_NAME_LENGTH];
+					strcpy(name, file_entry->name);
+					removeEndSlash(name);
+
+					initImeDialog(language_container[RENAME], name, MAX_NAME_LENGTH, SCE_IME_TYPE_BASIC_LATIN, 0);
+
+					dialog_step = DIALOG_STEP_RENAME;
+					break;
+				}
+				
+				case MENU_ENTRY_NEW_FOLDER:
+				{
+					// Find a new folder name
+					char path[MAX_PATH_LENGTH];
+
+					int count = 1;
+					while (1) {
+						if (count == 1) {
+							snprintf(path, MAX_PATH_LENGTH, "%s%s", file_list.path, language_container[NEW_FOLDER]);
+						} else {
+							snprintf(path, MAX_PATH_LENGTH, "%s%s (%d)", file_list.path, language_container[NEW_FOLDER], count);
+						}
+
+						SceIoStat stat;
+						if (sceIoGetstat(path, &stat) < 0)
+							break;
+
+						count++;
+					}
+
+					initImeDialog(language_container[NEW_FOLDER], path + strlen(file_list.path), MAX_NAME_LENGTH, SCE_IME_TYPE_BASIC_LATIN, 0);
+					dialog_step = DIALOG_STEP_NEW_FOLDER;
+					break;
+				}
+				
+				case MENU_ENTRY_MORE:
+				{
+					initContextMenuMore();
+					ctx_menu_mode = CONTEXT_MENU_MORE_OPENING;
+					return;
+				}
+			}
+		} else if (ctx_menu_mode == CONTEXT_MENU_MORE_OPENED) {
+			switch (ctx_menu_more_pos) {
+				case MENU_MORE_ENTRY_INSTALL_ALL:
+				{
+					// Empty install list
+					fileListEmpty(&install_list);
+
 					FileListEntry *file_entry = file_list.head->next; // Ignore '..'
 
 					int i;
 					for (i = 0; i < file_list.length - 1; i++) {
-						FileListEntry *mark_entry = malloc(sizeof(FileListEntry));
-						memcpy(mark_entry, file_entry, sizeof(FileListEntry));
-						fileListAddEntry(&mark_list, mark_entry, SORT_NONE);
+						char path[MAX_PATH_LENGTH];
+						snprintf(path, MAX_PATH_LENGTH, "%s%s", file_list.path, file_entry->name);
+
+						int type = getFileType(path);
+						if (type == FILE_TYPE_VPK) {
+							FileListEntry *install_entry = malloc(sizeof(FileListEntry));
+							memcpy(install_entry, file_entry, sizeof(FileListEntry));
+							fileListAddEntry(&install_list, install_entry, SORT_NONE);
+						}
 
 						// Next
 						file_entry = file_entry->next;
 					}
+
+					strcpy(install_list.path, file_list.path);
+
+					initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_ALL_QUESTION]);
+					dialog_step = DIALOG_STEP_INSTALL_QUESTION;
+					
+					break;
 				}
-
-				break;
-			}
-			
-			case MENU_ENTRY_MOVE:
-			case MENU_ENTRY_COPY:
-			{
-				// Mode
-				if (ctx_menu_pos == MENU_ENTRY_MOVE) {
-					copy_mode = COPY_MODE_MOVE;
-				} else {
-					copy_mode = isInArchive() ? COPY_MODE_EXTRACT : COPY_MODE_NORMAL;
-				}
-
-				// Empty copy list at first
-				if (copy_list.length > 0)
-					fileListEmpty(&copy_list);
-
-				FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
-
-				// Paths
-				if (fileListFindEntry(&mark_list, file_entry->name)) { // On marked entry
-					// Copy mark list to copy list
-					FileListEntry *mark_entry = mark_list.head;
-
-					int i;
-					for (i = 0; i < mark_list.length; i++) {
-						FileListEntry *copy_entry = malloc(sizeof(FileListEntry));
-						memcpy(copy_entry, mark_entry, sizeof(FileListEntry));
-						fileListAddEntry(&copy_list, copy_entry, SORT_NONE);
-
-						// Next
-						mark_entry = mark_entry->next;
-					}
-				} else {
-					FileListEntry *copy_entry = malloc(sizeof(FileListEntry));
-					memcpy(copy_entry, file_entry, sizeof(FileListEntry));
-					fileListAddEntry(&copy_list, copy_entry, SORT_NONE);
-				}
-
-				strcpy(copy_list.path, file_list.path);
-
-				char *message;
-
-				// On marked entry
-				if (fileListFindEntry(&copy_list, file_entry->name)) {
-					if (copy_list.length == 1) {
-						message = language_container[file_entry->is_folder ? COPIED_FOLDER : COPIED_FILE];
-					} else {
-						message = language_container[COPIED_FILES_FOLDERS];
-					}
-				} else {
-					message = language_container[file_entry->is_folder ? COPIED_FOLDER : COPIED_FILE];
-				}
-
-				// Copy message
-				infoDialog(message, copy_list.length);
-
-				break;
-			}
-
-			case MENU_ENTRY_PASTE:
-				initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[copy_mode == COPY_MODE_MOVE ? MOVING : COPYING]);
-				dialog_step = DIALOG_STEP_PASTE;
-				break;
-
-			case MENU_ENTRY_DELETE:
-			{
-				char *message;
-
-				FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
-
-				// On marked entry
-				if (fileListFindEntry(&mark_list, file_entry->name)) {
-					if (mark_list.length == 1) {
-						message = language_container[file_entry->is_folder ? DELETE_FOLDER_QUESTION : DELETE_FILE_QUESTION];
-					} else {
-						message = language_container[DELETE_FILES_FOLDERS_QUESTION];
-					}
-				} else {
-					message = language_container[file_entry->is_folder ? DELETE_FOLDER_QUESTION : DELETE_FILE_QUESTION];
-				}
-
-				initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, message);
-				dialog_step = DIALOG_STEP_DELETE_QUESTION;
-				break;
-			}
-
-			case MENU_ENTRY_RENAME:
-			{
-				FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
-
-				char name[MAX_NAME_LENGTH];
-				strcpy(name, file_entry->name);
-				removeEndSlash(name);
-
-				initImeDialog(language_container[RENAME], name, MAX_NAME_LENGTH);
-
-				dialog_step = DIALOG_STEP_RENAME;
-				break;
-			}
-			
-			case MENU_ENTRY_NEW_FOLDER:
-			{
-				// Find a new folder name
-				char path[MAX_PATH_LENGTH];
-
-				int count = 1;
-				while (1) {
-					if (count == 1) {
-						snprintf(path, MAX_PATH_LENGTH, "%s%s", file_list.path, language_container[NEW_FOLDER]);
-					} else {
-						snprintf(path, MAX_PATH_LENGTH, "%s%s (%d)", file_list.path, language_container[NEW_FOLDER], count);
-					}
-
-					SceIoStat stat;
-					if (sceIoGetstat(path, &stat) < 0)
-						break;
-
-					count++;
-				}
-
-				initImeDialog(language_container[NEW_FOLDER], path + strlen(file_list.path), MAX_NAME_LENGTH);
-				dialog_step = DIALOG_STEP_NEW_FOLDER;
-				break;
-			}
-			
-			case MENU_ENTRY_INSTALL_ALL:
-			{
-				// Empty install list
-				fileListEmpty(&install_list);
-
-				FileListEntry *file_entry = file_list.head->next; // Ignore '..'
-
-				int i;
-				for (i = 0; i < file_list.length - 1; i++) {
-					char path[MAX_PATH_LENGTH];
-					snprintf(path, MAX_PATH_LENGTH, "%s%s", file_list.path, file_entry->name);
-
-					int type = getFileType(path);
-					if (type == FILE_TYPE_VPK) {
-						FileListEntry *install_entry = malloc(sizeof(FileListEntry));
-						memcpy(install_entry, file_entry, sizeof(FileListEntry));
-						fileListAddEntry(&install_list, install_entry, SORT_NONE);
-					}
-
-					// Next
-					file_entry = file_entry->next;
-				}
-
-				strcpy(install_list.path, file_list.path);
-
-				initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[INSTALL_ALL_QUESTION]);
-				dialog_step = DIALOG_STEP_INSTALL_QUESTION;
 				
-				break;
+				case MENU_MORE_ENTRY_CALCULATE_SHA1:
+				{
+					// Ensure user wants to actually take the hash
+					initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_YESNO, language_container[HASH_FILE_QUESTION]);
+					dialog_step = DIALOG_STEP_HASH_QUESTION;
+					break;
+				}
 			}
 		}
 
@@ -855,10 +1022,11 @@ int dialogSteps() {
 			
 		case DIALOG_STEP_FTP:
 			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
+				refresh = 1;
 				dialog_step = DIALOG_STEP_NONE;
 			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
 				powerUnlock();
-				ftpvita_fini();
+				// ftpvita_fini();
 				refresh = 1;
 				dialog_step = DIALOG_STEP_NONE;
 			}
@@ -920,7 +1088,7 @@ int dialogSteps() {
 					strcpy(old_name, file_entry->name);
 					removeEndSlash(old_name);
 
-					if (strcmp(old_name, name) == 0) { // No change
+					if (strcasecmp(old_name, name) == 0) { // No change
 						dialog_step = DIALOG_STEP_NONE;
 					} else {
 						char old_path[MAX_PATH_LENGTH];
@@ -966,7 +1134,48 @@ int dialogSteps() {
 			}
 
 			break;
+
+		case DIALOG_STEP_HASH_QUESTION:
+			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
+				// Throw up the progress bar, enter hashing state
+				initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[HASHING]);
+				dialog_step = DIALOG_STEP_HASH_CONFIRMED;
+			} else if (msg_result == MESSAGE_DIALOG_RESULT_NO) {
+				// Quit
+				dialog_step = DIALOG_STEP_NONE;
+			}
+
+			break;
+
+		case DIALOG_STEP_HASH_CONFIRMED:
+			if (msg_result == MESSAGE_DIALOG_RESULT_RUNNING) {
+				// User has confirmed desire to hash, get requested file entry
+				FileListEntry *file_entry = fileListGetNthEntry(&file_list, base_pos + rel_pos);
+
+				// Place the full file path in cur_file
+				snprintf(cur_file, MAX_PATH_LENGTH, "%s%s", file_list.path, file_entry->name);
+
+				HashArguments args;
+				args.file_path = cur_file;
+
+				// Create a thread to run out actual sum
+				SceUID thid = sceKernelCreateThread("hash_thread", (SceKernelThreadEntry)hash_thread, 0x40, 0x10000, 0, 0, NULL);
+				if (thid >= 0)
+					sceKernelStartThread(thid, sizeof(HashArguments), &args);
 			
+				dialog_step = DIALOG_STEP_HASHING;
+			}
+
+			break;
+
+		case DIALOG_STEP_HASH_DISPLAY:
+			// Reset dialog state when user selects yes/no
+			if (msg_result == MESSAGE_DIALOG_RESULT_NONE || msg_result == MESSAGE_DIALOG_RESULT_FINISHED) {
+				dialog_step = DIALOG_STEP_NONE;
+			}
+
+			break;
+
 		case DIALOG_STEP_INSTALL_QUESTION:
 			if (msg_result == MESSAGE_DIALOG_RESULT_YES) {
 				initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);
@@ -980,6 +1189,7 @@ int dialogSteps() {
 		case DIALOG_STEP_INSTALL_CONFIRMED:
 			if (msg_result == MESSAGE_DIALOG_RESULT_RUNNING) {
 				InstallArguments args;
+
 				if(install_list.length > 0) {
 					FileListEntry *entry = install_list.head;
 					snprintf(install_path, MAX_PATH_LENGTH, "%s%s", install_list.path, entry->name);
@@ -1095,30 +1305,34 @@ void fileBrowserMenuCtrl() {
 
 	// FTP
 	if (pressed_buttons & SCE_CTRL_SELECT) {
-		// // Init FTP
-		// if (!ftpvita_is_initialized()) {
-		// 	int res = ftpvita_init(vita_ip, &vita_port);
-		// 	if (res < 0) {
-		// 		infoDialog(language_container[WIFI_ERROR]);
-		// 	} else {
-		// 		// Add all the current mountpoints to ftpvita
-		// 		int i;
-		// 		for (i = 0; i < getNumberMountPoints(); i++) {
-		// 			char **mount_points = getMountPoints();
-		// 			if (mount_points[i]) {
-		// 				ftpvita_add_device(mount_points[i]);
-		// 			}
-		// 		}
-		// 	}
+/*
+		// Init FTP
+		if (!ftpvita_is_initialized()) {
+			int res = ftpvita_init(vita_ip, &vita_port);
+			if (res < 0) {
+				infoDialog(language_container[WIFI_ERROR]);
+			} else {
+				// Add all the current mountpoints to ftpvita
+				int i;
+				for (i = 0; i < getNumberMountPoints(); i++) {
+					char **mount_points = getMountPoints();
+					if (mount_points[i]) {
+						ftpvita_add_device(mount_points[i]);
+					}
+				}
+				ftpvita_ext_add_custom_command("PROM", ftpvita_PROM);
+			}
 
-		// 	// Lock power timers
-		// 	powerLock();
-		// }
-		// // Dialog
-		// if (ftpvita_is_initialized()) {
-		// 	initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
-		// 	dialog_step = DIALOG_STEP_FTP;
-		// }
+			// Lock power timers
+			powerLock();
+		}
+
+		// Dialog
+		if (ftpvita_is_initialized()) {
+			initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
+			dialog_step = DIALOG_STEP_FTP;
+		}
+*/
 		show_control_thread_info();
 	}
 
@@ -1281,33 +1495,57 @@ int shellMain() {
 
 		int i;
 		for (i = 0; i < MAX_ENTRIES && (base_pos + i) < file_list.length; i++) {
-			uint32_t color = GENERAL_COLOR;
+			uint32_t color = FILE_COLOR;
 			float y = START_Y + (i * FONT_Y_SPACE);
+
+			vita2d_texture *icon = NULL;
 
 			// Folder
 			if (file_entry->is_folder) {
 				color = FOLDER_COLOR;
-				vita2d_draw_texture(folder_icon, SHELL_MARGIN_X, y + 3.0f);
+				icon = folder_icon;
 			} else {
-				if (file_entry->type == FILE_TYPE_BMP || file_entry->type == FILE_TYPE_PNG || file_entry->type == FILE_TYPE_JPEG) { // Images
-					color = IMAGE_COLOR;
-					vita2d_draw_texture(image_icon, SHELL_MARGIN_X, y + 3.0f);
-				} else if (file_entry->type == FILE_TYPE_VPK || file_entry->type == FILE_TYPE_ZIP) { // Archive
-					color = ARCHIVE_COLOR;
-					vita2d_draw_texture(archive_icon, SHELL_MARGIN_X, y + 3.0f);
-				} else if (file_entry->type == FILE_TYPE_MP3) { // Audio
-					color = IMAGE_COLOR;
-					vita2d_draw_texture(audio_icon, SHELL_MARGIN_X, y + 3.0f);
-				} else if (file_entry->type == FILE_TYPE_SFO) { // SFO
-					// note: specific color to be determined
-					vita2d_draw_texture(sfo_icon, SHELL_MARGIN_X, y + 3.0f);
-				} else if (file_entry->type == FILE_TYPE_INI || file_entry->type == FILE_TYPE_TXT || file_entry->type == FILE_TYPE_XML) { // TXT
-					// note: specific color to be determined
-					vita2d_draw_texture(text_icon, SHELL_MARGIN_X, y + 3.0f);
-				} else { // Other files
-					vita2d_draw_texture(file_icon, SHELL_MARGIN_X, y + 3.0f);
+				switch (file_entry->type) {
+					case FILE_TYPE_BMP:
+					case FILE_TYPE_PNG:
+					case FILE_TYPE_JPEG:
+						color = IMAGE_COLOR;
+						icon = image_icon;
+						break;
+						
+					case FILE_TYPE_VPK:
+					case FILE_TYPE_ZIP:
+						color = ARCHIVE_COLOR;
+						icon = archive_icon;
+						break;
+						
+					case FILE_TYPE_MP3:
+						color = IMAGE_COLOR;
+						icon = audio_icon;
+						break;
+						
+					case FILE_TYPE_SFO:
+						// color = SFO_COLOR;
+						icon = sfo_icon;
+						break;
+					
+					case FILE_TYPE_INI:
+					case FILE_TYPE_TXT:
+					case FILE_TYPE_XML:
+						// color = TXT_COLOR;
+						icon = text_icon;
+						break;
+						
+					default:
+						color = FILE_COLOR;
+						icon = file_icon;
+						break;
 				}
 			}
+
+			// Draw icon
+			if (icon)
+				vita2d_draw_texture(icon, SHELL_MARGIN_X, y + 3.0f);
 
 			// Current position
 			if (i == rel_pos)
@@ -1402,6 +1640,14 @@ void initShell() {
 
 	ctx_menu_max_width += 2.0f * CONTEXT_MENU_MARGIN;
 	ctx_menu_max_width = MAX(ctx_menu_max_width, CONTEXT_MENU_MIN_WIDTH);
+
+	for (i = 0; i < N_MENU_MORE_ENTRIES; i++) {
+		if (menu_more_entries[i].visibility != VISIBILITY_UNUSED)
+			ctx_menu_more_max_width = MAX(ctx_menu_more_max_width, vita2d_pgf_text_width(font, FONT_SIZE, language_container[menu_more_entries[i].name]));
+	}
+
+	ctx_menu_more_max_width += 2.0f * CONTEXT_MENU_MARGIN;
+	ctx_menu_more_max_width = MAX(ctx_menu_more_max_width, CONTEXT_MENU_MORE_MIN_WIDTH);
 }
 
 void getNetInfo() {
@@ -1416,6 +1662,20 @@ void getNetInfo() {
 		strcpy(ip, info.ip_address);
 	}
 }
+
+/*
+void ftpvita_PROM(ftpvita_client_info_t *client) {
+	char cmd[64];
+	char path[MAX_PATH_LENGTH];
+	sscanf(client->recv_buffer, "%s %s", cmd, path);
+
+	if (installPackage(path) == 0) {
+		ftpvita_ext_client_send_ctrl_msg(client, "200 OK PROMOTING\r\n");
+	} else {
+		ftpvita_ext_client_send_ctrl_msg(client, "500 ERROR PROMOTING\r\n");
+	}
+}
+*/
 
 int main(int argc, const char *argv[]) {
 	// Init VitaShell

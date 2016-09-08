@@ -20,6 +20,7 @@
 #include "archive.h"
 #include "file.h"
 #include "utils.h"
+#include "sha1.h"
 
 static char *mount_points[] = {
 	"app0:",
@@ -38,6 +39,27 @@ static char *mount_points[] = {
 };
 
 #define N_MOUNT_POINTS (sizeof(mount_points) / sizeof(char **))
+
+int allocateReadFile(char *file, void **buffer) {
+	SceUID fd = sceIoOpen(file, SCE_O_RDONLY, 0);
+	if (fd < 0)
+		return fd;
+
+	int off = sceIoLseek32(fd, 0, SCE_SEEK_CUR);
+	int size = sceIoLseek32(fd, 0, SCE_SEEK_END);
+	sceIoLseek(fd, off, SCE_SEEK_SET);
+
+	*buffer = malloc(size);
+	if (!*buffer) {
+		sceIoClose(fd);
+		return -1;
+	}
+
+	int read = sceIoRead(fd, *buffer, size);
+	sceIoClose(fd);
+
+	return read;
+}
 
 int ReadFile(char *file, void *buf, int size) {
 	SceUID fd = sceIoOpen(file, SCE_O_RDONLY, 0);
@@ -73,6 +95,59 @@ int getFileSize(char *pInputFileName)
 	return fileSize;
 }
 
+int getFileSha1(char *pInputFileName, uint8_t *pSha1Out, uint64_t *value, uint64_t max, void (* SetProgress)(uint64_t value, uint64_t max), int (* cancelHandler)()) {
+
+	// Set up SHA1 context	
+	SHA1_CTX ctx;
+	sha1_init(&ctx);
+
+	// Open the file to read, else return the error
+	SceUID fd = sceIoOpen(pInputFileName, SCE_O_RDONLY, 0);
+	if (fd < 0)
+		return fd;
+
+	// Open up the buffer for copying data into
+	void *buf = malloc(TRANSFER_SIZE);
+
+	int read;
+
+	// Actually take the SHA1 sum
+	while ((read = sceIoRead(fd, buf, TRANSFER_SIZE)) > 0)
+	{
+		sha1_update(&ctx, buf, read);
+
+		// Defined in io_process.c, check to make sure pointer isn't null before incrementing
+		if(value)
+			(*value)++; // Note: Max value is filesize/TRANSFER_SIZE
+
+		if(SetProgress)
+			SetProgress(value ? *value : 0, max);
+
+		// Check to see if cancelHandler exists, if so call it and free memory if cancelled
+		if(cancelHandler && cancelHandler()) {
+			free(buf);
+			sceIoClose(fd);
+			return 0;
+		}
+
+		// This is CPU intensive so the progress bar won't refresh unless we sleep
+		// DIALOG_WAIT seemed too long for this application
+		// so I set it to 1/2 of a second every 8192 TRANSFER_SIZE blocks
+		if((*value)%8192 == 0)
+			sceKernelDelayThread(500000);
+	}
+
+	// Final iteration of SHA1 sum, dump final value into pSha1Out buffer
+	sha1_final(&ctx, pSha1Out);
+
+	// Free up file buffer
+	free(buf);
+
+	// Close file proper
+	sceIoClose(fd);
+	return 1;
+}
+
 int getPathInfo(char *path, uint64_t *size, uint32_t *folders, uint32_t *files) {
 	SceUID dfd = sceIoDopen(path);
 	if (dfd >= 0) {
@@ -88,7 +163,7 @@ int getPathInfo(char *path, uint64_t *size, uint32_t *folders, uint32_t *files) 
 					continue;
 
 				char *new_path = malloc(strlen(path) + strlen(dir.d_name) + 2);
-				snprintf(new_path, MAX_PATH_LENGTH, "%s/%s", path, dir.d_name);
+				snprintf(new_path, MAX_PATH_LENGTH, "%s%s%s", path, hasEndSlash(path) ? "" : "/", dir.d_name);
 
 				if (SCE_S_ISDIR(dir.d_stat.st_mode)) {
 					int ret = getPathInfo(new_path, size, folders, files);
@@ -147,7 +222,7 @@ int removePath(char *path, uint64_t *value, uint64_t max, void (* SetProgress)(u
 					continue;
 
 				char *new_path = malloc(strlen(path) + strlen(dir.d_name) + 2);
-				snprintf(new_path, MAX_PATH_LENGTH, "%s/%s", path, dir.d_name);
+				snprintf(new_path, MAX_PATH_LENGTH, "%s%s%s", path, hasEndSlash(path) ? "" : "/", dir.d_name);
 
 				if (SCE_S_ISDIR(dir.d_stat.st_mode)) {
 					int ret = removePath(new_path, value, max, SetProgress, cancelHandler);
@@ -217,14 +292,14 @@ int removePath(char *path, uint64_t *value, uint64_t max, void (* SetProgress)(u
 
 int copyFile(char *src_path, char *dst_path, uint64_t *value, uint64_t max, void (* SetProgress)(uint64_t value, uint64_t max), int (* cancelHandler)()) {
 	// The source and destination paths are identical
-	if (strcmp(src_path, dst_path) == 0) {
+	if (strcasecmp(src_path, dst_path) == 0) {
 		return -1;
 	}
 
 	// The destination is a subfolder of the source folder
 	int len = strlen(src_path);
-	if (strncmp(src_path, dst_path, len) == 0 && dst_path[len] == '/') {
-		return -1;
+	if (strncasecmp(src_path, dst_path, len) == 0 && (dst_path[len] == '/' || dst_path[len - 1] == '/')) {
+		return -2;
 	}
 
 	SceUID fdsrc = sceIoOpen(src_path, SCE_O_RDONLY, 0);
@@ -277,14 +352,14 @@ int copyFile(char *src_path, char *dst_path, uint64_t *value, uint64_t max, void
 
 int copyPath(char *src_path, char *dst_path, uint64_t *value, uint64_t max, void (* SetProgress)(uint64_t value, uint64_t max), int (* cancelHandler)()) {
 	// The source and destination paths are identical
-	if (strcmp(src_path, dst_path) == 0) {
+	if (strcasecmp(src_path, dst_path) == 0) {
 		return -1;
 	}
 
 	// The destination is a subfolder of the source folder
 	int len = strlen(src_path);
-	if (strncmp(src_path, dst_path, len) == 0 && dst_path[len] == '/') {
-		return -1;
+	if (strncasecmp(src_path, dst_path, len) == 0 && (dst_path[len] == '/' || dst_path[len - 1] == '/')) {
+		return -2;
 	}
 
 	SceUID dfd = sceIoDopen(src_path);
@@ -318,10 +393,10 @@ int copyPath(char *src_path, char *dst_path, uint64_t *value, uint64_t max, void
 					continue;
 
 				char *new_src_path = malloc(strlen(src_path) + strlen(dir.d_name) + 2);
-				snprintf(new_src_path, MAX_PATH_LENGTH, "%s/%s", src_path, dir.d_name);
+				snprintf(new_src_path, MAX_PATH_LENGTH, "%s%s%s", src_path, hasEndSlash(src_path) ? "" : "/", dir.d_name);
 
 				char *new_dst_path = malloc(strlen(dst_path) + strlen(dir.d_name) + 2);
-				snprintf(new_dst_path, MAX_PATH_LENGTH, "%s/%s", dst_path, dir.d_name);
+				snprintf(new_dst_path, MAX_PATH_LENGTH, "%s%s%s", dst_path, hasEndSlash(dst_path) ? "" : "/", dir.d_name);
 
 				int ret = 0;
 
@@ -344,6 +419,99 @@ int copyPath(char *src_path, char *dst_path, uint64_t *value, uint64_t max, void
 		sceIoDclose(dfd);
 	} else {
 		return copyFile(src_path, dst_path, value, max, SetProgress, cancelHandler);
+	}
+
+	return 1;
+}
+
+int movePath(char *src_path, char *dst_path, int flags, uint64_t *value, uint64_t max, void (* SetProgress)(uint64_t value, uint64_t max), int (* cancelHandler)()) {
+	// The source and destination paths are identical
+	if (strcasecmp(src_path, dst_path) == 0) {
+		return -1;
+	}
+
+	// The destination is a subfolder of the source folder
+	int len = strlen(src_path);
+	if (strncasecmp(src_path, dst_path, len) == 0 && (dst_path[len] == '/' || dst_path[len - 1] == '/')) {
+		return -2;
+	}
+
+	int res = sceIoRename(src_path, dst_path);
+	if (res == SCE_ERROR_ERRNO_EEXIST && flags & (MOVE_INTEGRATE | MOVE_REPLACE)) {
+		// Src stat
+		SceIoStat src_stat;
+		memset(&src_stat, 0, sizeof(SceIoStat));
+		res = sceIoGetstat(src_path, &src_stat);
+		if (res < 0)
+			return res;
+
+		// Dst stat
+		SceIoStat dst_stat;
+		memset(&dst_stat, 0, sizeof(SceIoStat));
+		res = sceIoGetstat(dst_path, &dst_stat);
+		if (res < 0)
+			return res;
+
+		// Is dir
+		int src_is_dir = SCE_S_ISDIR(src_stat.st_mode);
+		int dst_is_dir = SCE_S_ISDIR(dst_stat.st_mode);
+
+		// One of them is a file and the other a directory, no replacement or integration possible
+		if (src_is_dir != dst_is_dir)
+			return -3;
+
+		// Replace file
+		if (!src_is_dir && !dst_is_dir && flags & MOVE_REPLACE) {
+			sceIoRemove(dst_path);
+
+			res = sceIoRename(src_path, dst_path);
+			if (res < 0)
+				return res;
+
+			return 1;
+		}
+
+		// Integrate directory
+		if (src_is_dir && dst_is_dir && flags & MOVE_INTEGRATE) {
+			SceUID dfd = sceIoDopen(src_path);
+			if (dfd < 0)
+				return dfd;
+
+			int res = 0;
+
+			do {
+				SceIoDirent dir;
+				memset(&dir, 0, sizeof(SceIoDirent));
+
+				res = sceIoDread(dfd, &dir);
+				if (res > 0) {
+					if (strcmp(dir.d_name, ".") == 0 || strcmp(dir.d_name, "..") == 0)
+						continue;
+
+					char *new_src_path = malloc(strlen(src_path) + strlen(dir.d_name) + 2);
+					snprintf(new_src_path, MAX_PATH_LENGTH, "%s%s%s", src_path, hasEndSlash(src_path) ? "" : "/", dir.d_name);
+
+					char *new_dst_path = malloc(strlen(dst_path) + strlen(dir.d_name) + 2);
+					snprintf(new_dst_path, MAX_PATH_LENGTH, "%s%s%s", dst_path, hasEndSlash(dst_path) ? "" : "/", dir.d_name);
+
+					// Recursive move
+					int ret = movePath(new_src_path, new_dst_path, flags, value, max, SetProgress, cancelHandler);
+
+					free(new_dst_path);
+					free(new_src_path);
+
+					if (ret <= 0) {
+						sceIoDclose(dfd);
+						return ret;
+					}
+				}
+			} while (res > 0);
+
+			sceIoDclose(dfd);
+			
+			// Integrated, now remove this directory
+			sceIoRmdir(src_path);
+		}
 	}
 
 	return 1;
@@ -396,7 +564,7 @@ FileListEntry *fileListFindEntry(FileList *list, char *name) {
 	int name_length = strlen(name);
 
 	while (entry) {
-		if (entry->name_length == name_length && strcmp(entry->name, name) == 0)
+		if (entry->name_length == name_length && strcasecmp(entry->name, name) == 0)
 			return entry;
 
 		entry = entry->next;
@@ -427,7 +595,7 @@ int fileListGetNumberByName(FileList *list, char *name) {
 	int n = 0;
 
 	while (entry) {
-		if (entry->name_length == name_length && strcmp(entry->name, name) == 0)
+		if (entry->name_length == name_length && strcasecmp(entry->name, name) == 0)
 			break;
 
 		n++;
@@ -533,7 +701,7 @@ int fileListRemoveEntryByName(FileList *list, char *name) {
 	int name_length = strlen(name);
 
 	while (entry) {
-		if (entry->name_length == name_length && strcmp(entry->name, name) == 0) {
+		if (entry->name_length == name_length && strcasecmp(entry->name, name) == 0) {
 			if (previous) {
 				previous->next = entry->next;
 			} else {
@@ -655,7 +823,7 @@ int fileListGetEntries(FileList *list, char *path) {
 		return fileListGetArchiveEntries(list, path);
 	}
 
-	if (strcmp(path, HOME_PATH) == 0) {
+	if (strcasecmp(path, HOME_PATH) == 0) {
 		return fileListGetMountPointEntries(list);
 	}
 

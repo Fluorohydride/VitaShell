@@ -57,7 +57,7 @@
 #include <sys/stat.h>
 
 #include <vita2d.h>
-#include <ftpvita.h>
+// #include <ftpvita.h>
 
 #include "functions.h"
 
@@ -116,6 +116,7 @@
 #define SCROLL_BAR_MIN_HEIGHT 4.0f
 
 // Context menu
+#define CONTEXT_MENU_MORE_MIN_WIDTH 210.0f
 #define CONTEXT_MENU_MIN_WIDTH 180.0f
 #define CONTEXT_MENU_MARGIN 20.0f
 #define CONTEXT_MENU_VELOCITY 10.0f
@@ -135,11 +136,26 @@
 
 #define BIG_BUFFER_SIZE 16 * 1024 * 1024
 
+enum MenuVisibilities {
+	VISIBILITY_UNUSED,
+	VISIBILITY_INVISIBLE,
+	VISIBILITY_VISIBLE,
+};
+
+typedef struct {
+	int name;
+	int visibility;
+} MenuEntry;
+
 enum ContextMenuModes {
-	CONTEXT_MENU_CLOSED,
-	CONTEXT_MENU_CLOSING,
-	CONTEXT_MENU_OPENED,
-	CONTEXT_MENU_OPENING,
+	CONTEXT_MENU_CLOSED = 0,
+	CONTEXT_MENU_CLOSING = 1,
+	CONTEXT_MENU_OPENED = 2,
+	CONTEXT_MENU_OPENING = 3,
+	CONTEXT_MENU_MORE_CLOSED = 2,
+	CONTEXT_MENU_MORE_CLOSING = 4,
+	CONTEXT_MENU_MORE_OPENED = 5,
+	CONTEXT_MENU_MORE_OPENING = 6,
 };
 
 enum DialogSteps {
@@ -153,6 +169,7 @@ enum DialogSteps {
 
 	DIALOG_STEP_FTP,
 
+	DIALOG_STEP_RENAME,
 	DIALOG_STEP_NEW_FOLDER,
 
 	DIALOG_STEP_COPYING,
@@ -172,13 +189,16 @@ enum DialogSteps {
 	DIALOG_STEP_INSTALLING,
 	DIALOG_STEP_INSTALLED,
 
-	DIALOG_STEP_RENAME,
-
 	DIALOG_STEP_UPDATE_QUESTION,
 	DIALOG_STEP_DOWNLOADING,
 	DIALOG_STEP_DOWNLOADED,
 	DIALOG_STEP_EXTRACTING,
 	DIALOG_STEP_EXTRACTED,
+
+	DIALOG_STEP_HASH_QUESTION,
+	DIALOG_STEP_HASH_CONFIRMED,
+	DIALOG_STEP_HASHING,
+	DIALOG_STEP_HASH_DISPLAY,
 
 	DIALOG_STEP_REMOTE_COPY_CONFIRM,
 	DIALOG_STEP_REMOTE_COPY_AGREED,
@@ -201,6 +221,9 @@ void drawScrollBar(int pos, int n);
 void drawShellInfo(char *path);
 
 int isInArchive();
+
+// void ftpvita_PROM(ftpvita_client_info_t *client);
+void install_unassisted_sync(char *path);
 
 #endif
 
