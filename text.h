@@ -19,11 +19,14 @@
 #ifndef __TEXT_H__
 #define __TEXT_H__
 
-#define MAX_LINES 1 * 1024 * 1024
+#define MAX_LINES 0x10000
 #define MAX_LINE_CHARACTERS 1024
 #define MAX_COPY_BUFFER_SIZE 1024
 
 #define TEXT_START_X 97.0f
+
+#define MAX_SEARCH_RESULTS 1024 * 1024
+#define MIN_SEARCH_TERM_LENGTH 3
 
 typedef struct TextListEntry {
 	struct TextListEntry *next;
@@ -41,6 +44,16 @@ typedef struct {
 typedef struct CopyEntry {
 	char line[MAX_LINE_CHARACTERS];
 } CopyEntry;
+
+void initTextContextMenuWidth();
+
+typedef struct SearchParams {
+	char search_term[MAX_LINE_CHARACTERS];
+	int *search_result_offsets;
+	char *buffer;
+	int size;
+	
+} SearchParams;
 
 int textViewer(char *file);
 

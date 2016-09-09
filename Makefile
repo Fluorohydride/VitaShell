@@ -1,6 +1,6 @@
 TITLE_ID = VITASHELL
 TARGET   = VitaShell
-GENOBJS  = main.o init.o io_process.o package_installer.o network_update.o archive.o photo.o file.o text.o hex.o sfo.o \
+GENOBJS  = main.o init.o io_process.o package_installer.o network_update.o context_menu.o archive.o photo.o file.o text.o hex.o sfo.o \
 		   uncommon_dialog.o message_dialog.o ime_dialog.o config.o theme.o language.o utils.o sha1.o \
 		   audioplayer.o vitatp.o minizip/unzip.o minizip/ioapi.o
 ifndef OBJS_OUTPUT_DIR
