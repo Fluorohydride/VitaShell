@@ -109,7 +109,7 @@ void infoDialog(char *msg, ...) {
 
 int power_tick_thread(SceSize args, void *argp) {
 	while (1) {
-		if (lock_power) {
+		if (lock_power > 0) {
 			sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
 		}
 
@@ -126,11 +126,12 @@ void initPowerTickThread() {
 }
 
 void powerLock() {
-	lock_power = 1;
+	lock_power++;
 }
 
 void powerUnlock() {
-	lock_power = 0;
+	lock_power--;
+	if (lock_power < 0) lock_power = 0;
 }
 
 void readPad() {
@@ -203,6 +204,10 @@ int holdButtons(SceCtrlData *pad, uint32_t buttons, uint64_t time) {
 	}
 
 	return 0;
+}
+
+int hasEndSlash(char *path) {
+	return path[strlen(path) - 1] == '/';
 }
 
 int removeEndSlash(char *path) {
