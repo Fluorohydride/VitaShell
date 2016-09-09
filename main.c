@@ -378,10 +378,9 @@ void drawShellInfo(char *path) {
 	pgf_draw_text(date_time_x, SHELL_MARGIN_Y, DATE_TIME_COLOR, FONT_SIZE, string);
 
 	// FTP
-	//if (ftpvita_is_initialized())
-	//	vita2d_draw_texture(ftp_image, date_time_x - 30.0f, SHELL_MARGIN_Y + 3.0f);
-	if (is_vitatp_running())
+	if (ftpvita_is_initialized())
 		vita2d_draw_texture(ftp_image, date_time_x - 30.0f, SHELL_MARGIN_Y + 3.0f);
+
 	// TODO: make this more elegant
 	// Path
 	int line_width = 0;
