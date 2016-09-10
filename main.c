@@ -1154,36 +1154,33 @@ void fileBrowserMenuCtrl() {
 
 	// FTP
 	if (pressed_buttons & SCE_CTRL_SELECT) {
-		if (hold_buttons & SCE_CTRL_RTRIGGER) {
-			show_control_thread_info();
-		} else {
-			// Init FTP
-			if (!ftpvita_is_initialized()) {
-				int res = ftpvita_init(vita_ip, &vita_port);
-				if (res < 0) {
-					infoDialog(language_container[WIFI_ERROR]);
-				} else {
-					// Add all the current mountpoints to ftpvita
-					int i;
-					for (i = 0; i < getNumberMountPoints(); i++) {
-						char **mount_points = getMountPoints();
-						if (mount_points[i]) {
-							ftpvita_add_device(mount_points[i]);
-						}
-					}
-					ftpvita_ext_add_custom_command("PROM", ftpvita_PROM);
-				}
+		show_control_thread_info();
+		// // Init FTP
+		// if (!ftpvita_is_initialized()) {
+		// 	int res = ftpvita_init(vita_ip, &vita_port);
+		// 	if (res < 0) {
+		// 		infoDialog(language_container[WIFI_ERROR]);
+		// 	} else {
+		// 		// Add all the current mountpoints to ftpvita
+		// 		int i;
+		// 		for (i = 0; i < getNumberMountPoints(); i++) {
+		// 			char **mount_points = getMountPoints();
+		// 			if (mount_points[i]) {
+		// 				ftpvita_add_device(mount_points[i]);
+		// 			}
+		// 		}
+		// 		ftpvita_ext_add_custom_command("PROM", ftpvita_PROM);
+		// 	}
 
-				// Lock power timers
-				powerLock();
-			}
+		// 	// Lock power timers
+		// 	powerLock();
+		// }
 
-			// Dialog
-			if (ftpvita_is_initialized()) {
-				initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
-				dialog_step = DIALOG_STEP_FTP;
-			}
-		}
+		// // Dialog
+		// if (ftpvita_is_initialized()) {
+		// 	initMessageDialog(SCE_MSG_DIALOG_BUTTON_TYPE_OK_CANCEL, language_container[FTP_SERVER], vita_ip, vita_port);
+		// 	dialog_step = DIALOG_STEP_FTP;
+		// }
 	}
 
 	// Move

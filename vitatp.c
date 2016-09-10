@@ -88,6 +88,7 @@ static int need_refresh = 0;
 #define VTP_FLAG_COMPRESSED_ZLIB 0x2
 #define VTP_FLAG_COMPRESSED_LZMA 0x4
 #define VTP_FLAG_EXTRA_PERMISSION 0x8
+#define VTP_FLAG_NO_PROGRESS 0x10
 
 // ==============================
 #define VTPR_BEGIN_FILE 0x18
@@ -295,7 +296,6 @@ static void task_callback(short type, int* args) {
                     }
                     case 3: {
                         int available = (left_size < vpk_left_bytes) ? left_size : vpk_left_bytes;
-                        offset += available;
                         vpk_left_bytes -= available;
                         comp_stream.next_in = &buffer[offset];
                         comp_stream.avail_in = available;
@@ -311,6 +311,7 @@ static void task_callback(short type, int* args) {
                             if(out_sz > 0 && writing_file >= 0)
                                 sceIoWrite(writing_file, decom_buffer, out_sz);
                         } while(comp_stream.avail_out == 0);
+                        offset += available;
                         UpdateProgress(args[2]);
                         if(vpk_left_bytes == 0) {
                             if(writing_file >= 0)
@@ -400,8 +401,10 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
             }
             send_response(VTPR_BEGIN_FILE, 2, 0, current_offset);
 
-            initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[COPYING]);
-            dialog_step = DIALOG_STEP_REMOTE_COPY;
+            if(!(current_file_flag & VTP_FLAG_NO_PROGRESS)) {
+                initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[COPYING]);
+                dialog_step = DIALOG_STEP_REMOTE_COPY;
+            }
             powerLock();
 
             task_canceled = 0;
@@ -455,9 +458,11 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                 file_buffer_size = 0;
             }
             add_task(TASK_CLOSE_FILE, 0, 0, 0);
-            sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, 100);
-            sceKernelDelayThread(COUNTUP_WAIT);
-            closeWaitDialog();
+            if(!(current_file_flag & VTP_FLAG_NO_PROGRESS)) {
+                sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, 100);
+                sceKernelDelayThread(COUNTUP_WAIT);
+                closeWaitDialog();
+            }
             powerUnlock();
             need_refresh = 1;
             break;
@@ -518,18 +523,26 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
         case VTP_INSTALL_VPK_END: {
             if(vpk_status == 0)
                 break;
+            if(file_buffer_size) {
+                add_task(TASK_VPK_BUFFER, (int)file_buffer, file_buffer_size, 0);
+                file_buffer = NULL;
+                file_buffer_size = 0;
+            }
+            wait_task_and_close_file();
             vpk_status = 0;
             if (makeHeadBin() < 0) {
+                send_response(VTPR_INSTALL_VPK_END, 1, 1, 0);
                 closeWaitDialog();
                 errorDialog(-1);
                 break;
             }
             if (promote(PACKAGE_DIR) < 0) {
+                send_response(VTPR_INSTALL_VPK_END, 1, 2, 0);
                 closeWaitDialog();
                 errorDialog(-1);
                 break;
             }
-            send_response(VTPR_INSTALL_VPK_END, 0, 0, 0);
+            send_response(VTPR_INSTALL_VPK_END, 1, 0, 0);
             sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, 100);
             sceKernelDelayThread(COUNTUP_WAIT);
             closeWaitDialog();
@@ -700,5 +713,5 @@ void show_control_thread_info() {
     SceNetCtlInfo info;
     info.ip_address[0] = 0;
     sceNetCtlInetGetInfo(SCE_NETCTL_INFO_GET_IP_ADDRESS, &info);
-    infoDialog("%s:%d", info.ip_address, network_port);
+    infoDialog("PSVITA Address:\n%s:%d", info.ip_address, network_port);
 }
