@@ -340,14 +340,14 @@ static void add_task(short type, int arg1, int arg2, int arg3) {
     task_end = (task_end + 1) % TASK_MAX_SIZE;
 }
 
-static void send_to_client(short pkt_type, char* data, short data_length) {
-    static pkt_header hdr;
-    hdr.length = 4 + data_length;
-    hdr.type = pkt_type;
-    sceNetSend(client_sockfd, &hdr, 4, 0);
-    if(data && data_length > 0)
-        sceNetSend(client_sockfd, data, data_length, 0);
-}
+// static void send_to_client(short pkt_type, char* data, short data_length) {
+//     static pkt_header hdr;
+//     hdr.length = 4 + data_length;
+//     hdr.type = pkt_type;
+//     sceNetSend(client_sockfd, &hdr, 4, 0);
+//     if(data && data_length > 0)
+//         sceNetSend(client_sockfd, data, data_length, 0);
+// }
 
 static void send_response(short pkt_type, int narg, int result1, int result2) {
     static pkt_response resp;
@@ -493,7 +493,7 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
                 break;
             } else {
                 vpk_status = 1;
-                removePath(PACKAGE_PARENT, NULL, 0, NULL, NULL);
+                removePath(PACKAGE_PARENT, NULL);
 	            sceIoMkdir(PACKAGE_PARENT, 0777);
                 send_response(VTPR_INSTALL_VPK, 1, 0, 0);
                 initMessageDialog(MESSAGE_DIALOG_PROGRESS_BAR, language_container[INSTALLING]);

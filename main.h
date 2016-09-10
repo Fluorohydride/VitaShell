@@ -64,10 +64,12 @@
 #define ENABLE_FILE_LOGGING 1
 
 // VitaShell version major.minor
-#define VITASHELL_VERSION_MAJOR 0x0
-#define VITASHELL_VERSION_MINOR 0x91
+#define VITASHELL_VERSION_MAJOR 0x00
+#define VITASHELL_VERSION_MINOR 0x95
 
 #define VITASHELL_VERSION ((VITASHELL_VERSION_MAJOR << 0x18) | (VITASHELL_VERSION_MINOR << 0x10))
+
+#define VITASHELL_LASTDIR "ux0:VitaShell/internal/lastdir.txt"
 
 #define ALIGN(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
 
@@ -191,7 +193,7 @@ extern vita2d_texture *headphone_image, *audio_previous_image, *audio_pause_imag
 
 extern int SCE_CTRL_ENTER, SCE_CTRL_CANCEL;
 
-extern int dialog_step;
+extern volatile int dialog_step;
 
 extern int use_custom_config;
 
