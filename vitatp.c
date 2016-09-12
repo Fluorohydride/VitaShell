@@ -61,6 +61,7 @@ static int client_sockfd = 0;
 static int current_file_size = 0;
 static int current_file_flag = 0;
 static SceUID writing_file = -1;
+static SceUID reading_file = -1;
 static int task_canceled = 0;
 static z_stream comp_stream;
 static unsigned char* decom_buffer = NULL;
@@ -79,9 +80,12 @@ static int need_refresh = 0;
 #define VTP_BEGIN_FILE 0x10
 #define VTP_FILE_CONTENT 0x11
 #define VTP_FILE_END 0x12
-#define VTP_INSTALL_VPK 0x13
-#define VTP_VPK_CONTENT 0x14
-#define VTP_INSTALL_VPK_END 0x15
+#define VTP_DOWN_FILE 0x13
+#define VTP_DOWN_CONTINUE 0x14
+
+#define VTP_INSTALL_VPK 0x20
+#define VTP_VPK_CONTENT 0x21
+#define VTP_INSTALL_VPK_END 0x22
 
 // ==============================
 #define VTP_FLAG_RESTART 0x1
@@ -91,12 +95,16 @@ static int need_refresh = 0;
 #define VTP_FLAG_NO_PROGRESS 0x10
 
 // ==============================
-#define VTPR_BEGIN_FILE 0x18
-#define VTPR_FILE_CONTINUE 0x19
-#define VTPR_FILE_END 0x1A
-#define VTPR_INSTALL_VPK 0x1B
-#define VTPR_VPK_CONTINUE 0x1C
-#define VTPR_INSTALL_VPK_END 0x1D
+#define VTPR_BEGIN_FILE 0x10
+#define VTPR_FILE_CONTINUE 0x11
+#define VTPR_FILE_END 0x12
+#define VTPR_DOWN_FILE 0x13
+#define VTPR_DOWN_CONTINUE 0x14
+#define VTPR_DOWN_END 0x15
+
+#define VTPR_INSTALL_VPK 0x20
+#define VTPR_VPK_CONTINUE 0x21
+#define VTPR_INSTALL_VPK_END 0x22
 
 // ==============================
 #define TASK_BEGIN_WRITE_FILE 0x1
@@ -109,11 +117,15 @@ static int need_refresh = 0;
 static void wait_task_and_close_file() {
     while(task_begin != task_end)
         sceKernelDelayThread(1000);
-    if(writing_file > 0) {
+    if(writing_file >= 0) {
         sceIoClose(writing_file);
         writing_file = -1;
         if(current_file_flag & VTP_FLAG_COMPRESSED_ZLIB)
             inflateEnd(&comp_stream);
+    }
+    if(reading_file >= 0) {
+        sceIoClose(reading_file);
+        reading_file = -1;
     }
     if(file_buffer) {
         free(file_buffer);
@@ -467,6 +479,40 @@ static void handle_packet(short pkt_type, char* data, short data_length) {
             need_refresh = 1;
             break;
         }
+        case VTP_DOWN_FILE: {
+            if(data_length <= 8) {
+                send_response(VTPR_DOWN_FILE, 2, 1, 0); // Invalid request
+                break;
+            }
+            if(reading_file >= 0) {
+                send_response(VTPR_DOWN_FILE, 2, 2, 0);
+                break;
+            }
+            int begin_offset = 0;
+            char file_name[256];
+            memcpy(&begin_offset, data, 4);
+            strncpy(file_name, &data[4], 256);
+            file_name[255] = 0;
+            reading_file = sceIoOpen(file_name, SCE_O_RDONLY, 0);
+            if(reading_file < 0) {
+                send_response(VTPR_DOWN_FILE, 2, 3, 0);
+                break;
+            }
+            int len = sceIoLseek32(reading_file, 0, SEEK_END);
+            if(begin_offset >= len) {
+                sceIoClose(reading_file);
+                reading_file = -1;
+                send_response(VTPR_DOWN_FILE, 2, 4, 0);
+                break;
+            }
+            sceIoLseek32(reading_file, begin_offset, SEEK_SET);
+            send_response(VTPR_DOWN_FILE, 2, 0, 0);
+            break;
+        }
+        case VTP_DOWN_CONTINUE: {
+            char buffer[1028];
+            break;
+        }
         case VTP_INSTALL_VPK: {
             // int64 all_size
             // int flag
@@ -690,7 +736,7 @@ error_netstat:
 }
 
 int check_and_run_remote_task() {
-    while(task_begin != task_end) {
+    if(task_begin != task_end) {
         task_callback(tasks[task_begin].type, tasks[task_begin].args);
         task_begin = (task_begin + 1) % TASK_MAX_SIZE;
     }
